@@ -1,0 +1,18 @@
+# .clang-format-ignore
+./bin
+./build
+./cmake_build
+./cmake_build_static
+./cmake_build_shared
+./distrib
+./doc
+./include
+./lib
+# Our tutorials have special formatting: skip them
+./tutorial
+# hexagon_remote/bin/src is also special
+./src/runtime/hexagon_remote/bin/src
+# mini_webgpu.h is copied from upstream with some local mods
+./src/runtime/mini_webgpu.h
+./dependencies/spirv
+*.fbs.h
