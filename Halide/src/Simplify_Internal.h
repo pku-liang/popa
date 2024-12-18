@@ -364,7 +364,7 @@ public:
     Expr visit(const Not *op, ExprInfo *info);
     Expr visit(const Select *op, ExprInfo *info);
     Expr visit(const Ramp *op, ExprInfo *info);
-    Stmt visit(const IfThenElse *op);
+    virtual Stmt visit(const IfThenElse *op);
     Expr visit(const Load *op, ExprInfo *info);
     Expr visit(const Call *op, ExprInfo *info);
     Expr visit(const Shuffle *op, ExprInfo *info);
@@ -372,7 +372,7 @@ public:
     Expr visit(const Let *op, ExprInfo *info);
     Stmt visit(const LetStmt *op);
     Stmt visit(const AssertStmt *op);
-    Stmt visit(const For *op);
+    virtual Stmt visit(const For *op);
     Stmt visit(const Provide *op);
     Stmt visit(const Store *op);
     Stmt visit(const Allocate *op);

@@ -27,6 +27,7 @@
 #include "Pipeline.h"
 #include "Simplify.h"
 #include "Util.h"
+#include "../../t2s/src/DebugPrint.h"
 
 // MSVC won't set __cplusplus correctly unless certain compiler flags are set
 // (and CMake doesn't set those flags for you even if you specify C++17),
@@ -412,8 +413,6 @@ void CodeGen_LLVM::init_codegen(const std::string &name, bool any_strict_float) 
 
     internal_assert(module && context);
 
-    debug(1) << "Target triple of initial module: " << module->getTargetTriple() << "\n";
-
     module->setModuleIdentifier(name);
 
     // Add some target specific info to the module as metadata.
@@ -459,6 +458,20 @@ void CodeGen_LLVM::init_codegen(const std::string &name, bool any_strict_float) 
     internal_assert(semaphore_t_type) << "Did not find halide_semaphore_t in initial module";
 }
 
+void CodeGen_LLVM::compile_to_devsrc(const Module &input) {
+    init_codegen(input.name(), input.any_strict_float());
+    internal_assert(module && context && builder)
+        << "The CodeGen_LLVM subclass should have made an initial module before calling CodeGen_LLVM::compile\n";
+
+    for (const auto &b : input.buffers()) {
+        compile_buffer(b);
+    }
+    for (const auto &f : input.functions()) {
+        const auto names = get_mangled_names(f, get_target());
+        compile_func(f, names.simple_name, names.extern_name);
+    }
+}
+
 std::unique_ptr<llvm::Module> CodeGen_LLVM::compile(const Module &input) {
     init_codegen(input.name(), input.any_strict_float());
 
@@ -466,7 +479,6 @@ std::unique_ptr<llvm::Module> CodeGen_LLVM::compile(const Module &input) {
         << "The CodeGen_LLVM subclass should have made an initial module before calling CodeGen_LLVM::compile\n";
 
     // Generate the code for this module.
-    debug(1) << "Generating llvm bitcode...\n";
     for (const auto &b : input.buffers()) {
         compile_buffer(b);
     }
@@ -971,7 +983,6 @@ llvm::Function *CodeGen_LLVM::add_argv_wrapper(llvm::Function *fn,
             wrapper_args.push_back(builder->CreateLoad(i->getType(), ptr));
         }
     }
-    debug(4) << "Creating call from wrapper to actual function\n";
     llvm::CallInst *result = builder->CreateCall(fn, wrapper_args);
     // This call should never inline
     result->setIsNoInline();
@@ -1297,7 +1308,6 @@ bool CodeGen_LLVM::sym_exists(const string &name) const {
 
 Value *CodeGen_LLVM::codegen(const Expr &e) {
     internal_assert(e.defined());
-    debug(4) << "Codegen: " << e.type() << ", " << e << "\n";
     value = nullptr;
     e.accept(this);
     internal_assert(value) << "Codegen of an expr did not produce an llvm value\n"
@@ -1391,7 +1401,18 @@ void CodeGen_LLVM::visit(const IntImm *op) {
 }
 
 void CodeGen_LLVM::visit(const UIntImm *op) {
-    value = ConstantInt::get(llvm_type_of(op->type), op->value);
+    if (op->type.is_complex()) {
+        if (op->type.bits() == 64) {
+            codegen(reinterpret(Complex(32), make_const(UInt(64), op->value)));
+        } else {
+//            codegen(op->value.re_complex64());
+//            codegen(op->value.im_complex64());
+//            codegen(reinterpret(Complex(64), make_const(UInt(128), op->value)));
+            value = ConstantInt::get(llvm_type_of(UInt(128)), op->value);
+        }
+    } else {
+        value = ConstantInt::get(llvm_type_of(op->type), op->value);
+    }
 }
 
 void CodeGen_LLVM::visit(const FloatImm *op) {
@@ -1415,7 +1436,6 @@ void CodeGen_LLVM::visit(const Cast *op) {
     if (upgrade_type_for_arithmetic(src) != src ||
         upgrade_type_for_arithmetic(dst) != dst) {
         // Handle casts to and from types for which we don't have native support.
-        debug(4) << "Emulating cast from " << src << " to " << dst << "\n";
         if ((src.is_float() && src.bits() < 32) ||
             (dst.is_float() && dst.bits() < 32)) {
             string warn_msg =
@@ -1542,6 +1562,30 @@ void CodeGen_LLVM::visit(const Add *op) {
                                               {VPArg(a, 0), VPArg(b)})) {
             value = builder->CreateFAdd(a, b);
         }
+    } else if (op->type.is_complex()) {
+        llvm::Type *ftype = f32_t;
+        ArrayType *float_array_type = ArrayType::get(ftype, 2);
+        Value *float_array = builder->CreateAlloca(float_array_type);
+        Value *arr_ptr_0, *arr_ptr_1, *ptr;
+        if (op->type.bits() == 64) {
+            arr_ptr_0 = builder->CreateConstInBoundsGEP2_32(float_array_type, float_array, 0, 0);
+            arr_ptr_1 = builder->CreateConstInBoundsGEP2_32(float_array_type, float_array, 0, 1);
+            ptr = builder->CreatePointerCast(arr_ptr_0, llvm::Type::getInt64PtrTy(*context));
+        }
+        builder->CreateStore(a, ptr);
+        Value *a_re = builder->CreateLoad(ftype, arr_ptr_0);
+        Value *a_im = builder->CreateLoad(ftype, arr_ptr_1);
+
+        builder->CreateStore(b, ptr);
+        Value *b_re = builder->CreateLoad(ftype, arr_ptr_0);
+        Value *b_im = builder->CreateLoad(ftype, arr_ptr_1);
+
+        Value *result_re = builder->CreateFAdd(a_re, b_re);
+        Value *result_im = builder->CreateFAdd(a_im, b_im);
+
+        builder->CreateStore(result_re, arr_ptr_0);
+        builder->CreateStore(result_im, arr_ptr_1);
+        value = builder->CreateLoad(float_array_type, ptr);
     } else if (op->type.is_int() && op->type.bits() >= 32) {
         // We tell llvm integers don't wrap, so that it generates good
         // code for loop indices.
@@ -1571,6 +1615,31 @@ void CodeGen_LLVM::visit(const Sub *op) {
                                               {VPArg(a, 0), VPArg(b)})) {
             value = builder->CreateFSub(a, b);
         }
+    } else if (op->type.is_complex()) {
+        llvm::Type *ftype = f32_t;
+        ArrayType *float_array_type = ArrayType::get(ftype, 2);
+        Value *float_array = builder->CreateAlloca(float_array_type);
+        Value *arr_ptr_0, *arr_ptr_1, *ptr;
+        if (op->type.bits() == 64) {
+            arr_ptr_0 = builder->CreateConstInBoundsGEP2_32(float_array_type, float_array, 0, 0);
+            arr_ptr_1 = builder->CreateConstInBoundsGEP2_32(float_array_type, float_array, 0, 1);
+            ptr = builder->CreatePointerCast(arr_ptr_0, llvm::Type::getInt64PtrTy(*context));
+        }
+
+        builder->CreateStore(a, ptr);
+        Value *a_re = builder->CreateLoad(ftype, arr_ptr_0);
+        Value *a_im = builder->CreateLoad(ftype, arr_ptr_1);
+
+        builder->CreateStore(b, ptr);
+        Value *b_re = builder->CreateLoad(ftype, arr_ptr_0);
+        Value *b_im = builder->CreateLoad(ftype, arr_ptr_1);
+
+        Value *result_re = builder->CreateFSub(a_re, b_re);
+        Value *result_im = builder->CreateFSub(a_im, b_im);
+
+        builder->CreateStore(result_re, arr_ptr_0);
+        builder->CreateStore(result_im, arr_ptr_1);
+        value = builder->CreateLoad(float_array_type, ptr);
     } else if (op->type.is_int() && op->type.bits() >= 32) {
         // We tell llvm integers don't wrap, so that it generates good
         // code for loop indices.
@@ -1604,6 +1673,42 @@ void CodeGen_LLVM::visit(const Mul *op) {
                                               {VPArg(a, 0), VPArg(b)})) {
             value = builder->CreateFMul(a, b);
         }
+    } else if (op->type.is_complex()) {
+        llvm::Type *ftype = f32_t;
+        if (op->type.bits() == 128) {
+            ftype = f64_t;
+        }
+        ArrayType *float_array_type = ArrayType::get(ftype, 2);
+        Value *float_array = builder->CreateAlloca(float_array_type);
+        Value *arr_ptr_0, *arr_ptr_1, *ptr;
+        if (op->type.bits() == 64) {
+            arr_ptr_0 = builder->CreateConstInBoundsGEP2_32(float_array_type, float_array, 0, 0);
+            arr_ptr_1 = builder->CreateConstInBoundsGEP2_32(float_array_type, float_array, 0, 1);
+            ptr = builder->CreatePointerCast(arr_ptr_0, llvm::Type::getInt64PtrTy(*context));
+        } else {
+            arr_ptr_0 = builder->CreateConstInBoundsGEP2_64(float_array_type, float_array, 0, 0);
+            arr_ptr_1 = builder->CreateConstInBoundsGEP2_64(float_array_type, float_array, 0, 1);
+            ptr = builder->CreatePointerCast(arr_ptr_0, llvm::Type::getFP128PtrTy(*context));
+        }
+
+        builder->CreateStore(a, ptr);
+        Value *a_re = builder->CreateLoad(ftype, arr_ptr_0);
+        Value *a_im = builder->CreateLoad(ftype, arr_ptr_1);
+
+        builder->CreateStore(b, ptr);
+        Value *b_re = builder->CreateLoad(ftype, arr_ptr_0);
+        Value *b_im = builder->CreateLoad(ftype, arr_ptr_1);
+
+        Value *re_re = builder->CreateFMul(a_re, b_re);
+        Value *im_im = builder->CreateFMul(a_im, b_im);
+        Value *re_im = builder->CreateFMul(a_re, b_im);
+        Value *im_re = builder->CreateFMul(a_im, b_re);
+        Value *result_re = builder->CreateFSub(re_re, im_im);
+        Value *result_im = builder->CreateFAdd(re_im, im_re);
+
+        builder->CreateStore(result_re, arr_ptr_0);
+        builder->CreateStore(result_im, arr_ptr_1);
+        value = builder->CreateLoad(float_array_type, ptr);
     } else if (op->type.is_int() && op->type.bits() >= 32) {
         // We tell llvm integers don't wrap, so that it generates good
         // code for loop indices.
@@ -1639,6 +1744,40 @@ void CodeGen_LLVM::visit(const Div *op) {
                                               {VPArg(a, 0), VPArg(b)})) {
             value = builder->CreateFDiv(a, b);
         }
+    } else if (op->type.is_complex()) {
+        Value *a = codegen(op->a);
+        Value *b = codegen(op->b);
+        llvm::Type *ftype = f32_t;
+        ArrayType *float_array_type = ArrayType::get(ftype, 2);
+        Value *float_array = builder->CreateAlloca(float_array_type);
+        Value *arr_ptr_0, *arr_ptr_1, *ptr;
+        if (op->type.bits() == 64) {
+            arr_ptr_0 = builder->CreateConstInBoundsGEP2_32(float_array_type, float_array, 0, 0);
+            arr_ptr_1 = builder->CreateConstInBoundsGEP2_32(float_array_type, float_array, 0, 1);
+            ptr = builder->CreatePointerCast(arr_ptr_0, llvm::Type::getInt64PtrTy(*context));
+        }
+
+        builder->CreateStore(a, ptr);
+        Value *a_re = builder->CreateLoad(ftype, arr_ptr_0);
+        Value *a_im = builder->CreateLoad(ftype, arr_ptr_1);
+
+        builder->CreateStore(b, ptr);
+        Value *b_re = builder->CreateLoad(ftype, arr_ptr_0);
+        Value *b_im = builder->CreateLoad(ftype, arr_ptr_1);
+
+        Value *re_re = builder->CreateFMul(a_re, b_re);
+        Value *im_im = builder->CreateFMul(a_im, b_im);
+        Value *re_im = builder->CreateFMul(a_re, b_im);
+        Value *im_re = builder->CreateFMul(a_im, b_re);
+        Value *abs_square = builder->CreateFAdd(builder->CreateFMul(b_re, b_re), builder->CreateFMul(b_im, b_im));
+        Value *result_re = builder->CreateFAdd(re_re, im_im);
+        result_re = builder->CreateFDiv(result_re, abs_square);
+        Value *result_im = builder->CreateFSub(im_re, re_im);
+        result_im = builder->CreateFDiv(result_im, abs_square);
+
+        builder->CreateStore(result_re, arr_ptr_0);
+        builder->CreateStore(result_im, arr_ptr_1);
+        value = builder->CreateLoad(float_array_type, ptr);
     } else {
         value = codegen(lower_int_uint_div(op->a, op->b));
     }
@@ -2318,7 +2457,6 @@ void CodeGen_LLVM::codegen_predicated_store(const Store *op) {
             add_tbaa_metadata(store, op->name, slice_index);
         }
     } else {  // It's not dense vector store, we need to scalarize it
-        debug(4) << "Scalarize predicated vector store\n";
         Type value_type = op->value.type().element_of();
         Value *vpred = codegen(op->predicate);
         Value *vval = codegen(op->value);
@@ -2467,7 +2605,6 @@ void CodeGen_LLVM::codegen_predicated_load(const Load *op) {
         value = codegen_vector_load(op->type, op->name, ramp->base, op->image, op->param,
                                     op->alignment, vpred, true, llvm_stride);
     } else if (ramp && stride && stride->value == -1) {
-        debug(4) << "Predicated dense vector load with stride -1\n\t" << Expr(op) << "\n";
         vector<int> indices(ramp->lanes);
         for (int i = 0; i < ramp->lanes; i++) {
             indices[i] = ramp->lanes - 1 - i;
@@ -2492,7 +2629,6 @@ void CodeGen_LLVM::codegen_predicated_load(const Load *op) {
     } else {  // It's not dense vector load, we need to scalarize it
         Expr load_expr = Load::make(op->type, op->name, op->index, op->image,
                                     op->param, const_true(op->type.lanes()), op->alignment);
-        debug(4) << "Scalarize predicated vector load\n\t" << load_expr << "\n";
         Expr pred_load = Call::make(load_expr.type(),
                                     Call::if_then_else,
                                     {op->predicate, load_expr},
@@ -2983,6 +3119,8 @@ void CodeGen_LLVM::visit(const Call *op) {
                     } else {
                         buf_size += 14;  // Scientific notation with 6 decimal places.
                     }
+                } else if (t.is_complex()) {
+                    buf_size += 94;
                 } else if (t == type_of<halide_buffer_t *>()) {
                     // Not a strict upper bound (there isn't one), but ought to be enough for most buffers.
                     buf_size += 512;
@@ -3009,6 +3147,7 @@ void CodeGen_LLVM::visit(const Call *op) {
             llvm::Function *append_double = module->getFunction("halide_double_to_string");
             llvm::Function *append_pointer = module->getFunction("halide_pointer_to_string");
             llvm::Function *append_buffer = module->getFunction("halide_buffer_to_string");
+            // llvm::Function *append_complex = module->getFunction("halide_complex_to_string");
 
             internal_assert(append_string);
             internal_assert(append_int64);
@@ -3047,6 +3186,10 @@ void CodeGen_LLVM::visit(const Call *op) {
                     // Use scientific notation for doubles
                     call_args.push_back(ConstantInt::get(i32_t, t.bits() == 64 ? 1 : 0));
                     dst = builder->CreateCall(append_double, call_args);
+                } else if (t.is_complex()) {
+                    call_args.push_back(codegen(Cast::make(Complex(32), arg)));
+                    call_args.push_back(ConstantInt::get(i32_t, 1));
+                    dst = builder->CreateCall(append_uint64, call_args);
                 } else if (t == type_of<halide_buffer_t *>()) {
                     Value *buf = codegen(arg);
                     buf = builder->CreatePointerCast(buf, append_buffer->getFunctionType()->getParamType(2));
@@ -3178,8 +3321,6 @@ void CodeGen_LLVM::visit(const Call *op) {
                                                        current_function_args,
                                                        get_target())
                                          .extern_name;
-                debug(1) << "Did not find function " << sub_fn_name
-                         << ", assuming extern \"C\" " << extern_sub_fn_name << "\n";
                 vector<llvm::Type *> arg_types;
                 for (const auto &arg : function->args()) {
                     arg_types.push_back(arg.getType());
@@ -3193,7 +3334,6 @@ void CodeGen_LLVM::visit(const Call *op) {
 
             llvm::GlobalValue *sub_fn_ptr = module->getNamedValue(extern_sub_fn_name);
             if (!sub_fn_ptr) {
-                debug(1) << "Did not find function ptr " << extern_sub_fn_name << ", assuming extern \"C\".\n";
                 sub_fn_ptr = new GlobalVariable(*module, sub_fn->getType(),
                                                 /*isConstant*/ true, GlobalValue::ExternalLinkage,
                                                 /*initializer*/ nullptr, extern_sub_fn_name);
@@ -3311,6 +3451,9 @@ void CodeGen_LLVM::visit(const Call *op) {
         value = codegen(lower_concat_bits(op));
     } else if (op->is_intrinsic(Call::get_runtime_vscale)) {
         value = builder->CreateVScale(ConstantInt::get(i32_t, 1));
+    } else if (ends_with(op->name, ".temp")) {
+        llvm::Value *temp = sym_get(op->name);
+        value = builder->CreateLoad(temp->getType(), temp);
     } else if (op->is_intrinsic()) {
         Expr lowered = lower_intrinsic(op);
         if (!lowered.defined()) {
@@ -3427,7 +3570,6 @@ void CodeGen_LLVM::visit(const Call *op) {
         bool takes_user_context = function_takes_user_context(op->name);
         if (takes_user_context) {
             internal_assert(fn) << "External function " << op->name << " is marked as taking user_context, but is not in the runtime module. Check if runtime_api.cpp needs to be rebuilt.\n";
-            debug(4) << "Adding user_context to " << op->name << " args\n";
             args.insert(args.begin(), get_user_context());
         }
 
@@ -3452,9 +3594,7 @@ void CodeGen_LLVM::visit(const Call *op) {
 
             fn = llvm::Function::Create(func_t, llvm::Function::ExternalLinkage, name, module.get());
             fn->setCallingConv(CallingConv::C);
-            debug(4) << "Did not find " << op->name << ". Declared it extern \"C\".\n";
         } else {
-            debug(4) << "Found " << op->name << "\n";
 
             // TODO: Say something more accurate here as there is now
             // partial information in the handle_type field, but it is
@@ -3481,8 +3621,6 @@ void CodeGen_LLVM::visit(const Call *op) {
                     }
 
                     if (t != args[i]->getType()) {
-                        debug(4) << "Pointer casting argument to extern call: "
-                                 << halide_arg << "\n";
                         args[i] = builder->CreatePointerCast(args[i], t);
                     }
                 } else if (args[i]->getType()->isVectorTy()) {
@@ -3961,7 +4099,15 @@ void CodeGen_LLVM::visit(const Realize *op) {
 }
 
 void CodeGen_LLVM::visit(const Provide *op) {
-    internal_error << "Provide encountered during codegen\n";
+    if (ends_with(op->name, ".temp")) {
+        internal_assert(op->values.size() == 1);
+        internal_assert(op->args.size() == 0);
+        Value *lval = sym_get(op->name);
+        Value *rval = codegen(op->values[0]);
+        builder->CreateStore(rval, lval);
+    } else {
+        internal_error << "Provide encountered during codegen\n";
+    }
 }
 
 void CodeGen_LLVM::visit(const IfThenElse *op) {
@@ -4047,8 +4193,10 @@ void CodeGen_LLVM::visit(const IfThenElse *op) {
 }
 
 void CodeGen_LLVM::visit(const Evaluate *op) {
-    codegen(op->value);
-
+    // skip annotation
+    if (!(op->value.as<Call>() && op->value.as<Call>()->is_intrinsic(Call::annotate))) {
+        codegen(op->value);
+    }
     // Discard result
     value = nullptr;
 }

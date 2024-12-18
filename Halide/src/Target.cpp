@@ -640,6 +640,7 @@ const std::map<std::string, Target::Feature> feature_name_map = {
     {"cuda_capability_80", Target::CUDACapability80},
     {"cuda_capability_86", Target::CUDACapability86},
     {"opencl", Target::OpenCL},
+    {"oneapi", Target::OneAPI},
     {"cl_doubles", Target::CLDoubles},
     {"cl_half", Target::CLHalf},
     {"cl_atomics64", Target::CLAtomics64},
@@ -704,6 +705,10 @@ const std::map<std::string, Target::Feature> feature_name_map = {
     {"semihosting", Target::Semihosting},
     {"avx10_1", Target::AVX10_1},
     {"x86apx", Target::X86APX},
+    {"intel_fpga", Target::IntelFPGA},
+    {"intel_gpu", Target::IntelGPU},
+    {"cm", Target::CM},
+    {"enable_synthesis", Target::EnableSynthesis}
     // NOTE: When adding features to this map, be sure to update PyEnums.cpp as well.
 };
 
@@ -1126,7 +1131,13 @@ bool Target::supported() const {
     bad |= has_feature(Target::CUDA);
 #endif
 #if !defined(WITH_OPENCL)
-    bad |= has_feature(Target::OpenCL);
+    bad |= has_feature(Target::OpenCL); 
+#endif
+#if !defined(WITH_ONEAPI)
+    bad |= has_feature(Target::OneAPI);
+#endif
+#if !defined(WITH_CM)
+    bad |= has_feature(Target::IntelGPU);
 #endif
 #if !defined(WITH_METAL)
     bad |= has_feature(Target::Metal);
@@ -1153,6 +1164,10 @@ void Target::set_feature(Feature f, bool value) {
     }
     user_assert(f < FeatureEnd) << "Invalid Target feature.\n";
     features.set(f, value);
+    if (f == Target::IntelFPGA && value) {
+        // Enabling generating OpenCL code for Intel FPGAs
+        features.set(Target::OpenCL, true);
+    }
 }
 
 void Target::set_features(const std::vector<Feature> &features_to_set, bool value) {
@@ -1205,7 +1220,9 @@ bool Target::has_gpu_feature() const {
             has_feature(Metal) ||
             has_feature(D3D12Compute) ||
             has_feature(Vulkan) ||
-            has_feature(WebGPU));
+            has_feature(WebGPU) ||
+            has_feature(IntelGPU) ||
+            has_feature(OneAPI));
 }
 
 int Target::get_cuda_capability_lower_bound() const {
@@ -1295,6 +1312,10 @@ bool Target::supports_type(const Type &t, DeviceAPI device) const {
         if (t.is_float() && t.bits() == 64) {
             return has_feature(Target::CLDoubles);
         }
+    } else if (device == DeviceAPI::OneAPI) {
+        if (t.is_float() && t.bits() == 64) {
+            return has_feature(Target::CLDoubles);
+        }
     } else if (device == DeviceAPI::D3D12Compute) {
         // Shader Model 5.x can optionally support double-precision; 64-bit int
         // types are not supported.
@@ -1369,6 +1390,10 @@ Target::Feature target_feature_for_device_api(DeviceAPI api) {
         return Target::CUDA;
     case DeviceAPI::OpenCL:
         return Target::OpenCL;
+    case DeviceAPI::OneAPI:
+        return Target::OneAPI;
+    case DeviceAPI::CM:
+        return Target::IntelGPU;
     case DeviceAPI::Metal:
         return Target::Metal;
     case DeviceAPI::Hexagon:

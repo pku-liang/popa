@@ -34,6 +34,8 @@ public:
         CExternDecl,
         CPlusPlusExternDecl,
         CPlusPlusFunctionInfoHeader,
+        HostHeader,
+        HostImplementation,
     };
 
     /** Initialize a C code generator pointing at a particular output
@@ -150,7 +152,8 @@ protected:
     bool is_header() {
         return output_kind == CHeader ||
                output_kind == CPlusPlusHeader ||
-               output_kind == CPlusPlusFunctionInfoHeader;
+               output_kind == CPlusPlusFunctionInfoHeader ||
+               output_kind == HostHeader;
     }
 
     /** Return true if only generating an interface, which may be extern "C" or C++ */
@@ -172,14 +175,21 @@ protected:
                output_kind == CPlusPlusFunctionInfoHeader;
     }
 
+    /** Return true if only generating an interface, which may be extern "C" or C++ */
+    bool is_host_interface() {
+        return output_kind == HostHeader ||
+               output_kind == HostImplementation;
+    }
+
     /** Open a new C scope (i.e. throw in a brace, increase the indent) */
-    void open_scope();
+    virtual void open_scope();
 
     /** Close a C scope (i.e. throw in an end brace, decrease the indent) */
-    void close_scope(const std::string &comment);
+    virtual void close_scope(const std::string &comment);
 
     struct Allocation {
         Type type;
+        MemoryType memory_type;
     };
 
     /** Track the types of allocations to avoid unnecessary casts. */
@@ -255,7 +265,7 @@ protected:
     void visit(const Atomic *) override;
     void visit(const VectorReduce *) override;
 
-    void visit_binop(Type t, const Expr &a, const Expr &b, const char *op);
+    virtual void visit_binop(Type t, const Expr &a, const Expr &b, const char *op);
     void visit_relop(Type t, const Expr &a, const Expr &b, const char *scalar_op, const char *vector_op);
 
     template<typename T>

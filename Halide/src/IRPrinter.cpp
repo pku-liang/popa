@@ -40,8 +40,13 @@ ostream &operator<<(ostream &out, const Type &type) {
     case Type::BFloat:
         out << "bfloat";
         break;
+    case Type::Complex:
+        out << "complex";
+        break;
     }
-    if (!type.is_handle()) {
+    if (type.is_complex()) {
+        out << type.bits() / 2;
+    } else if (!type.is_handle()) {
         out << type.bits();
     }
     if (type.lanes() > 1) {
@@ -102,6 +107,12 @@ ostream &operator<<(ostream &out, const DeviceAPI &api) {
     case DeviceAPI::OpenCL:
         out << "<OpenCL>";
         break;
+    case DeviceAPI::OneAPI:
+        out << "<OneAPI>";
+        break;
+    case DeviceAPI::CM:
+        out << "<CM>";
+        break;
     case DeviceAPI::Metal:
         out << "<Metal>";
         break;
@@ -152,6 +163,9 @@ std::ostream &operator<<(std::ostream &out, const MemoryType &t) {
         break;
     case MemoryType::AMXTile:
         out << "AMXTile";
+        break;
+    case MemoryType::CLPtr:
+        out << "CLPtr";
         break;
     }
     return out;
@@ -362,6 +376,12 @@ ostream &operator<<(ostream &out, const ForType &type) {
         break;
     case ForType::Unrolled:
         out << "unrolled";
+        break;
+    case ForType::PragmaUnrolled:
+        out << "punrolled";
+        break;
+    case ForType::DelayUnroll:
+        out << "dunrolled";
         break;
     case ForType::Vectorized:
         out << "vectorized";
@@ -585,7 +605,15 @@ void IRPrinter::visit(const IntImm *op) {
 }
 
 void IRPrinter::visit(const UIntImm *op) {
-    stream << "(" << op->type << ")" << op->value;
+    stream << "(" << op->type << ")";
+    if (op->type.is_complex()) {
+        float f32array[2];
+        uint64_t *p64 = (uint64_t *)&f32array[0];
+        *p64 = op->value;
+        stream << "(" << f32array[0] << ", " << f32array[1] << "i)";
+    } else {
+        stream << (uint64_t)op->value;
+    }
 }
 
 void IRPrinter::visit(const FloatImm *op) {
@@ -803,8 +831,10 @@ void IRPrinter::visit(const Select *op) {
     print_no_parens(op->condition);
     stream << ", ";
     print_no_parens(op->true_value);
-    stream << ", ";
-    print_no_parens(op->false_value);
+    if (op->false_value.defined()) {
+        stream << ", ";
+        print_no_parens(op->false_value);
+    }
     stream << ")";
 }
 
@@ -1048,7 +1078,7 @@ void IRPrinter::visit(const Free *op) {
 
 void IRPrinter::visit(const Realize *op) {
     ScopedBinding<> bind(known_type, op->name);
-    stream << get_indent() << "realize " << op->name << "(";
+    stream << get_indent() << "realize " << op->name;
     for (size_t i = 0; i < op->bounds.size(); i++) {
         stream << "[";
         print_no_parens(op->bounds[i].min);
@@ -1059,7 +1089,10 @@ void IRPrinter::visit(const Realize *op) {
             stream << ", ";
         }
     }
-    stream << ")";
+    for (size_t i = 0; i < op->types.size(); i++) {
+        stream << ((i == 0) ? " of type `" : ",") << op->types[i]
+               << ((i == op->types.size() - 1) ? "'" : "");
+    }
     if (op->memory_type != MemoryType::Auto) {
         stream << " in " << op->memory_type;
     }
@@ -1106,7 +1139,10 @@ void IRPrinter::visit(const Prefetch *op) {
 }
 
 void IRPrinter::visit(const Block *op) {
+    // printf("block\n");
+    // printf("first\n");
     print(op->first);
+    // printf("rest\n");
     print(op->rest);
 }
 
@@ -1161,7 +1197,7 @@ void IRPrinter::visit(const IfThenElse *op) {
 }
 
 void IRPrinter::visit(const Evaluate *op) {
-    stream << get_indent();
+    stream << get_indent() << "Evaluate(";
     print_no_parens(op->value);
     stream << "\n";
 }

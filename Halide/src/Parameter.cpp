@@ -173,6 +173,13 @@ Expr Parameter::scalar_expr() const {
         default:
             break;
         }
+    } else if (t.is_complex()) {
+        switch (t.bits()) {
+        case 64:
+            return Expr(sv.u.u32);
+        default:
+            break;
+        }
     } else if (t.is_handle()) {
         // handles are always uint64 internally.
         switch (t.bits()) {

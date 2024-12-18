@@ -30,6 +30,9 @@
 #include "Solve.h"
 #include "Substitute.h"
 #include "Util.h"
+#include "../../t2s/src/CheckFuncConstraints.h"
+#include "../../t2s/src/DebugPrint.h"
+#include "../../t2s/src/Overlay.h"
 
 namespace Halide {
 
@@ -56,8 +59,10 @@ std::string dump_dim_list(const vector<DimType> &dims) {
 
 }  // namespace
 
-Func::Func(const string &name)
+Func::Func(const string &name, Place place)
     : func(unique_name(name)) {
+    func.place(place);
+    func.min_depth(0);
 }
 
 Func::Func(const Type &required_type, int required_dims, const string &name)
@@ -68,18 +73,53 @@ Func::Func(const std::vector<Type> &required_types, int required_dims, const str
     : func(required_types, required_dims, unique_name(name)) {
 }
 
-Func::Func()
-    : func(unique_name('f')) {
+Func::Func(Place place)
+    : Func(unique_name('f'), place) {
 }
 
-Func::Func(const Expr &e)
+Func::Func(const Expr &e, Place place)
     : func(unique_name('f')) {
     (*this)(_) = e;
+    func.place(place);
+    func.min_depth(0);
 }
 
-Func::Func(Function f)
-    : func(std::move(f)) {
+Func::Func(const string &name, const std::vector<Type> &return_types, const std::vector<Var> &args, Place place) :
+    func(name) {
+    func.place(place);
+    func.min_depth(0);
+    func.output_types() = return_types;
+    std::vector<Expr> _args(args.size());
+    for (size_t i = 0; i < args.size(); i++) {
+        _args[i] = Var(args[i].name());
+    }
+    func.decl_args() = _args;
+    CheckFuncConstraints::check_declare(func);
 }
+
+Func::Func(const string &name, Type return_type, const std::vector<Var> &args, Place place) :
+    func(name) {
+    func.place(place);
+    func.min_depth(0);
+    func.output_types() = {return_type};
+    std::vector<Expr> _args(args.size());
+    for (size_t i = 0; i < args.size(); i++) {
+        _args[i] = Var(args[i].name());
+    }
+    func.decl_args() = _args;
+    CheckFuncConstraints::check_declare(func);
+}
+
+Func::Func(Type return_type, const std::vector<Var> &args, Place place) :
+    Func(unique_name('f'), return_type, args, place) { }
+
+Func::Func(Function f, Place place)
+    : func(std::move(f)) {
+    func.place(place);
+    func.min_depth(f.min_depth());
+}
+
+Func::Func(Function f) : Func(f, f.place()) {}
 
 const string &Func::name() const {
     return func.name();
@@ -1041,7 +1081,8 @@ Func Stage::rfactor(vector<pair<RVar, Var>> preserved) {
 
     // Then, we need to remove lifted RVars from the dims list
     for (const string &rv : rvars_removed) {
-        remove(rv);
+        void remove_dimension(Stage &stage, Definition &definition, const string &var);
+        remove_dimension(*this, definition, rv);
     }
 
     // Define the new update definition which refers to the intermediate Func.
@@ -1472,8 +1513,8 @@ Stage &Stage::purify(const VarOrRVar &old_var, const VarOrRVar &new_var) {
     return *this;
 }
 
-void Stage::remove(const string &var) {
-    debug(4) << "In schedule for " << name() << ", remove " << var << "\n";
+void remove_dimension(Stage &stage, Definition &definition, const string &var) {
+    debug(4) << "In schedule for " << stage.name() << ", remove " << var << "\n";
 
     StageSchedule &schedule = definition.schedule();
 
@@ -1491,11 +1532,11 @@ void Stage::remove(const string &var) {
 
     if (!found) {
         user_error
-            << "In schedule for " << name()
+            << "In schedule for " << stage.name()
             << ", could not find remove dimension: "
             << var
             << "\n"
-            << dump_argument_list();
+            << stage.dump_argument_list();
     }
 
     std::set<string> removed_vars;
@@ -1517,11 +1558,11 @@ void Stage::remove(const string &var) {
             if (splits[i - 1].inner == old_name ||
                 splits[i - 1].outer == old_name) {
                 user_error
-                    << "In schedule for " << name()
+                    << "In schedule for " << stage.name()
                     << ", can't remove variable " << old_name
                     << " because it has already been fused into "
                     << splits[i - 1].old_var << "\n"
-                    << dump_argument_list();
+                    << stage.dump_argument_list();
             }
             if (should_remove(splits[i - 1].old_var)) {
                 is_removed = true;
@@ -1540,10 +1581,10 @@ void Stage::remove(const string &var) {
             }
             if (splits[i - 1].old_var == old_name) {
                 user_error
-                    << "In schedule for " << name()
+                    << "In schedule for " << stage.name()
                     << ", can't remove a variable " << old_name
                     << " because it has already been renamed or split.\n"
-                    << dump_argument_list();
+                    << stage.dump_argument_list();
             }
         } else {
             debug(4) << "    replace/rename " << splits[i - 1].old_var
@@ -1554,10 +1595,10 @@ void Stage::remove(const string &var) {
             }
             if (splits[i - 1].old_var == old_name) {
                 user_error
-                    << "In schedule for " << name()
+                    << "In schedule for " << stage.name()
                     << ", can't remove a variable " << old_name
                     << " because it has already been renamed or split.\n"
-                    << dump_argument_list();
+                    << stage.dump_argument_list();
             }
         }
         if (!is_removed) {
@@ -1903,6 +1944,51 @@ Stage &Stage::reorder(const std::vector<VarOrRVar> &vars) {
         dims[sorted[i]] = dims_old[idx[i]];
     }
 
+    // Make compute_with stay at the same position
+    Definition &original_def = (stage_index == 0) ? function.definition() : function.update(stage_index - 1);
+    FuseLoopLevel &fuse_level = original_def.schedule().fuse_level();
+    // Already have compute_with
+    if (!fuse_level.level.lock().is_inlined()) {
+        LoopLevel original_level = fuse_level.level;
+        const VarOrRVar& original_var = original_level.var();
+
+        // Find the new var at the same position after reorder
+        string new_var_name;
+        for (size_t i = 0; i < dims_old.size(); i++) {
+            if (var_name_match(dims_old[i].var, original_var.name())) {
+                new_var_name = dims[i].var;
+                break;
+            }
+        }
+
+        if (new_var_name=="") {
+            // Inner-most level
+            // For some extended ure
+            new_var_name = dims[0].var;
+        }
+        // Var is changed after reorder
+        if (new_var_name != original_var.name()) {
+            size_t new_var_pos = 0;
+            bool found = false;
+            // Find the VarOrRVar (not just name string)
+            for (size_t i = 0; i < vars.size(); i++) {
+                if (var_name_match(vars[i].name(), new_var_name)) {
+                    new_var_pos = i;
+                    found = true;
+                    break;
+                }
+            }
+
+            internal_assert(found);
+            // The LoopLevel only has public API that need Func or Function
+            // So, constuct a new Func with same name.
+            // The LoopLevel only records the func name.
+            LoopLevel new_level(Func(original_level.func()), vars[new_var_pos], original_level.stage_index());
+            new_level.lock();
+            fuse_level.level = new_level; 
+        }
+    }
+
     dims_old.swap(dims);
 
     // We're not allowed to reorder Var::outermost inwards (rfactor assumes it's
@@ -2117,8 +2203,10 @@ Stage &Stage::compute_with(LoopLevel loop_level, const map<string, LoopAlignStra
 
     FuseLoopLevel &fuse_level = original_def.schedule().fuse_level();
     if (!fuse_level.level.lock().is_inlined()) {
-        user_warning << name() << " already has a compute_with at " << fuse_level.level.to_string()
-                     << ". Replacing it with a new compute_with at " << loop_level.to_string() << "\n";
+        if (fuse_level.level.to_string() != loop_level.to_string()) {
+             user_warning << name() << " already has a compute_with at " << fuse_level.level.to_string()
+                         << ". Replacing it with a new compute_with at " << loop_level.to_string() << "\n";
+        }
     }
     fuse_level.level = loop_level;
     fuse_level.align = align;
@@ -2154,6 +2242,37 @@ void Stage::unscheduled() {
 void Func::invalidate_cache() {
     if (pipeline_.defined()) {
         pipeline_.invalidate_cache();
+    }
+}
+
+std::set<Internal::ForType> supported_types = {
+    Internal::ForType::Serial,
+    Internal::ForType::GPUBlock,
+    Internal::ForType::GPUThread,
+    Internal::ForType::Unrolled,
+    Internal::ForType::Vectorized,
+    Internal::ForType::Parallel
+};
+void Func::apply_same_loop_transform_to_merged_ures() {
+    vector<Dim> &func_dims = func.definition().schedule().dims();
+    for (auto merged_f : func.definition().schedule().merged_ures()) {
+        vector<Dim> &merged_dims = merged_f.func.definition().schedule().dims();
+        bool done = false;
+        for (size_t k = 0; k < func_dims.size(); ++k)
+            for (size_t i = 0; i < merged_dims.size(); ++i) {
+                if (var_name_match(merged_dims[i].var, func_dims[k].var)) {
+                    auto for_type = func_dims[k].for_type;
+                    auto device_api = func_dims[k].device_api;
+                    internal_assert(supported_types.count(for_type) > 0)
+                        << "Not implmented the loop transformation (with ForType = " << for_type << ") "
+                        << "for a merged URE " << merged_f.name() << "\n";
+                    merged_dims[i].for_type = for_type;
+                    merged_dims[i].device_api = device_api;
+                    done = true;
+                    break;
+                }
+            }
+        internal_assert(done) << "Found no matched loop variable in a merged URE " << merged_f.name() << ".\n";
     }
 }
 
@@ -2440,9 +2559,29 @@ Func &Func::parallel(const VarOrRVar &var) {
     return *this;
 }
 
-Func &Func::vectorize(const VarOrRVar &var) {
+Func &Func::__vectorize(VarOrRVar var) {
     invalidate_cache();
     Stage(func, func.definition(), 0).vectorize(var);
+    return *this;
+}
+
+Func &Func::vectorize(VarOrRVar var) {
+    user_assert(!(func.definition().schedule().is_merged())) << "Can't vectorize for Func that has already been merged.\n";
+    __vectorize(var);
+    for (auto f : func.definition().schedule().merged_ures()) {
+        bool exist = false;
+        for (Var v : f.args()) {
+            if (v.name() == var.name()) {
+                exist = true;
+            }
+        }
+        if (exist) {
+            f.__vectorize(var);
+        } else {
+            debug(4) << "Not found axis " << var.name() << " in " << f.name() << "\n"
+                         << "Skipping vectorization for it\n";
+        }
+    }
     return *this;
 }
 
@@ -2459,6 +2598,26 @@ Func &Func::parallel(const VarOrRVar &var, const Expr &factor, TailStrategy tail
 }
 
 Func &Func::vectorize(const VarOrRVar &var, const Expr &factor, TailStrategy tail) {
+    user_assert(!(func.definition().schedule().is_merged())) << "Can't vectorize for Func that has already been merged.\n";
+    __vectorize(var, factor, tail);
+    for (auto f : func.definition().schedule().merged_ures()) {
+        bool exist = false;
+        for (Var v : f.args()) {
+            if (v.name() == var.name()) {
+                exist = true;
+            }
+        }
+        if (exist) {
+            f.__vectorize(var, factor, tail);
+        } else {
+            debug(4) << "Not found axis " << var.name() << " in " << f.name() << "\n"
+                         << "Skipping vectorization for it\n";
+        }
+    }
+    return *this;
+}
+
+Func &Func::__vectorize(const VarOrRVar &var, const Expr &factor, TailStrategy tail) {
     invalidate_cache();
     Stage(func, func.definition(), 0).vectorize(var, factor, tail);
     return *this;
@@ -2467,6 +2626,14 @@ Func &Func::vectorize(const VarOrRVar &var, const Expr &factor, TailStrategy tai
 Func &Func::unroll(const VarOrRVar &var, const Expr &factor, TailStrategy tail) {
     invalidate_cache();
     Stage(func, func.definition(), 0).unroll(var, factor, tail);
+    for (auto f : func.definition().schedule().merged_ures()) {
+        for (Var v : f.args()) {
+            if (v.name() == var.name()) {
+                Stage(f.function(), f.function().definition(), 0).unroll(var, factor, tail);
+                break;
+            }
+        }
+    }
     return *this;
 }
 
@@ -2676,6 +2843,49 @@ Func &Func::tile(const std::vector<VarOrRVar> &previous,
 Func &Func::reorder(const std::vector<VarOrRVar> &vars) {
     invalidate_cache();
     Stage(func, func.definition(), 0).reorder(vars);
+
+    if (func.has_merged_defs()) {
+        for (auto f : func.definition().schedule().merged_ures()) {
+            if (!f.function().definition().schedule().is_extended_ure()) {
+                f.reorder(vars);
+            } else {
+                // The UREs only have Vars. There is no RVars.
+                map<string, Var> out_vars;
+                for (auto v : f.args()) {
+                    out_vars[v.name()] = v;
+                }
+                vector<VarOrRVar> out_var_order;
+                for (auto v : vars) {
+                    if (out_vars.find(v.name()) != out_vars.end()) {
+                        out_var_order.push_back(v);
+                    }
+                }
+                f.reorder(out_var_order);
+            }
+        }
+        // This part should be aligned with merge_ures
+        auto ures = func.definition().schedule().merged_ures();
+        size_t num_outputs = 0;
+        for (auto f : ures) {
+            if (f.func.definition().schedule().is_output()) num_outputs++;
+        }
+        VarOrRVar innermost_loop = vars[0];
+        Func last_non_output_func = *this;
+        if (ures.size() > num_outputs) {
+            last_non_output_func = *(ures.rbegin() + num_outputs);
+        }
+        for (auto it = ures.rbegin(); it != ures.rbegin()+num_outputs; it++) {
+            it->compute_with(last_non_output_func, innermost_loop);
+        }
+        if (ures.size() > num_outputs) {
+            // Use compute_with iteratively to achieve merge_ure
+            for (auto it = ures.rbegin()+num_outputs; it != ures.rend()-1; it++) {
+                it->compute_with(*(it + 1), innermost_loop);
+            }
+        }
+        ures[0].compute_with(*this, innermost_loop);
+    }
+
     return *this;
 }
 
@@ -2803,6 +3013,36 @@ Func &Func::gpu_tile(const VarOrRVar &x, const VarOrRVar &y, const VarOrRVar &z,
     return *this;
 }
 
+Func &Func::gpu_fetch(Var loop_level, MemoryType mem_type, vector<Var> outs, vector<Expr> reuse_args) {
+    invalidate_cache();
+
+    FetchParams &fp = func.definition().schedule().fetch_params();
+    fp.store_at = loop_level.name();
+    fp.store_in = mem_type;
+    // TODO: remove rw_len
+    fp.rw_len = 8;
+    fp.reuse_args = reuse_args;
+
+    vector<string> out_dims;
+    for (auto &v : outs) {
+        out_dims.push_back(v.name());
+    }
+    fp.out_dims = out_dims;
+
+    return *this;
+}
+
+Func &Func::gpu_store(const vector<Expr> &args, const string &name, size_t sz) {
+    invalidate_cache();
+
+    StoreParams &rp = func.definition().schedule().store_params();
+    rp.shape_args = args;
+    rp.name = name;
+    rp.rw_len = sz;
+
+    return *this;
+}
+
 Func &Func::hexagon(const VarOrRVar &x) {
     invalidate_cache();
     Stage(func, func.definition(), 0).hexagon(x);
@@ -2917,6 +3157,22 @@ Func &Func::fold_storage(const Var &dim, const Expr &factor, bool fold_forward) 
                << ", could not find var " << dim.name()
                << " to fold the storage of.\n"
                << dump_dim_list(func.schedule().storage_dims());
+    return *this;
+}
+
+Func &Func::late_fuse(Func f, int v_outs) {
+    invalidate_cache();
+    std::string name = f.name() + ".s0." + "run_on_device";
+    func.schedule().late_fuse_params().late_fuse_level = name;
+    func.schedule().late_fuse_params().v_outs = v_outs;
+    return *this;
+}
+
+Func &Func::late_fuse(Func f, Var var, int v_outs) {
+    invalidate_cache();
+    std::string name = f.name() + ".s0." + var.name();
+    func.schedule().late_fuse_params().late_fuse_level = name;
+    func.schedule().late_fuse_params().v_outs = v_outs;
     return *this;
 }
 
@@ -3154,11 +3410,72 @@ vector<Expr> FuncRef::args_with_implicit_vars(const vector<Expr> &exprs) const {
     return result;
 }
 
+// Check that Select without a default value does not appear
+// inside any other expression.
+class CheckSelectsWithoutDefaults : public IRMutator {
+    using IRMutator::visit;
+
+    bool in_an_expr;
+
+public:
+    CheckSelectsWithoutDefaults() { in_an_expr = false; }
+
+    Expr mutate(const Expr &expr) override {
+        if (expr.defined() && (expr.as<Select>() || expr.as<Let>())) {
+            IRMutator::mutate(expr);
+            return expr;
+        }
+        bool original_in_an_expr = in_an_expr;
+        in_an_expr = true;
+        IRMutator::mutate(expr);
+        in_an_expr = original_in_an_expr;
+        return expr;
+    }
+
+    Stmt mutate(const Stmt &stmt) override {
+        return IRMutator::mutate(stmt);
+    }
+
+    Expr visit(const Select *s) override {
+        user_assert(s->false_value.defined() || !in_an_expr)
+                << "Select without a default value cannot be used INSIDE another expression, "
+                << "because it must provide a value for that expression in any case.\n";
+        bool original_in_an_expr = in_an_expr;
+        in_an_expr = true;
+        this->mutate(s->true_value);
+        if (s->false_value.defined()) {
+            this->mutate(s->false_value);
+        }
+        in_an_expr = original_in_an_expr;
+        return s;
+    }
+
+    Expr visit(const Let *l) override {
+        bool original_in_an_expr = in_an_expr;
+        in_an_expr = true;
+        this->mutate(l->value);
+        in_an_expr = original_in_an_expr;
+        this->mutate(l->body);
+        return l;
+    }
+};
+
+void check_selects_without_defaults(const Expr e) {
+    CheckSelectsWithoutDefaults checker;
+    checker.mutate(e);
+}
+
 Stage FuncRef::operator=(const Expr &e) {
+    check_selects_without_defaults(e);
     return (*this) = Tuple(e);
 }
 
 Stage FuncRef::operator=(const Tuple &e) {
+    // Ensure that any select without default is not used INSIDE any expression.
+    for (auto expr: e.as_vector()) {
+        check_selects_without_defaults(expr);
+    }
+
     if (!func.has_pure_definition()) {
         for (size_t i = 0; i < args.size(); ++i) {
             const Variable *var = args[i].as<Variable>();
@@ -3191,6 +3508,18 @@ Stage FuncRef::operator=(const FuncRef &e) {
     } else {
         return (*this) = Tuple(e);
     }
+}
+
+Stage FuncRef::operator=(Overlay &overlay) {
+    auto size = overlay.exprs.size();
+    user_assert(size > 0) << "Not found expr for enqueue task def";
+    Expr &e = overlay.exprs[size - 1];
+
+    // Create hooks between kernel func and overlay
+    overlay.definition().taskItems().push_back(func);
+
+    func.overlay(overlay);
+    return (*this) = e;
 }
 
 namespace {
@@ -3342,10 +3671,13 @@ Stage FuncRef::operator/=(const FuncRef &e) {
 }
 
 FuncRef::operator Expr() const {
+    /*
+     * In T2S-os, we allow to create URE like this: A(i, j) = ...A(i - 1, j)...;
     user_assert(func.has_pure_definition() || func.has_extern_definition())
         << "Can't call Func \"" << func.name() << "\" because it has not yet been defined.\n";
+    */
 
-    user_assert(func.outputs() == 1)
+    user_assert(func.outputs() <= 1)
         << "Can't convert a reference Func \"" << func.name()
         << "\" to an Expr, because " << func.name() << " returns a Tuple.\n";
 
@@ -3535,6 +3867,22 @@ void Func::compile_to_c(const string &filename, const vector<Argument> &args,
     pipeline().compile_to_c(filename, args, fn_name, target);
 }
 
+void Func::compile_to_oneapi(const vector<Argument> &args,
+                            const string &fn_name,
+                            const Target &target) {
+    user_assert( target.has_feature(Target::IntelFPGA) || target.has_feature(Target::IntelGPU) ) << " IntelFPGA or IntelGPU Target not found.\n";
+    user_assert( target.has_feature((Target::OneAPI)) ) << " OneAPI Target not found.\n";
+    pipeline().compile_to_oneapi(args, fn_name, target);
+}
+
+void Func::compile_to_cm(const vector<Argument> &args,
+                        const string &fn_name,
+                        const Target &target) {
+    user_assert(target.has_feature(Target::IntelGPU))
+        << "Please make sure your target has IntelGPU feature";
+    pipeline().compile_to_cm(args, fn_name, target);
+}
+
 void Func::compile_to_lowered_stmt(const string &filename,
                                    const vector<Argument> &args,
                                    StmtOutputFormat fmt,
@@ -3544,6 +3892,11 @@ void Func::compile_to_lowered_stmt(const string &filename,
 
 void Func::print_loop_nest() {
     pipeline().print_loop_nest();
+}
+
+void Func::compile_to_host(const string &filename_prefix, const vector<Argument> &args,
+                           const string &fn_name, const Target &target) {
+    pipeline().compile_to_host(filename_prefix, args, fn_name, target);
 }
 
 void Func::compile_to_file(const string &filename_prefix,

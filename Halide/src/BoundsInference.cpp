@@ -839,15 +839,21 @@ public:
         void populate_scope(Scope<Interval> &result) {
             for (const string &farg : func.args()) {
                 string arg = name + ".s" + std::to_string(stage) + "." + farg;
+                string var = arg;
+                // if (func.has_shift_reg())
+                //     var = arg + ".def";
                 result.push(farg,
-                            Interval(Variable::make(Int(32), arg + ".min"),
-                                     Variable::make(Int(32), arg + ".max")));
+                            Interval(Variable::make(Int(32), var + ".min"),
+                                     Variable::make(Int(32), var + ".max")));
             }
             if (stage > 0) {
                 for (const ReductionVariable &rv : rvars) {
                     string arg = name + ".s" + std::to_string(stage) + "." + rv.var;
-                    result.push(rv.var, Interval(Variable::make(Int(32), arg + ".min"),
-                                                 Variable::make(Int(32), arg + ".max")));
+                    string var = arg;
+                    // if (func.has_shift_reg())
+                    //     var = arg + ".def";
+                    result.push(rv.var, Interval(Variable::make(Int(32), var + ".min"),
+                                                 Variable::make(Int(32), var + ".max")));
                 }
             }
 
@@ -983,6 +989,10 @@ public:
                         // Add the condition on which this value is evaluated to the box before merging
                         Box &box = i.second;
                         box.used = cval.cond;
+                        debug(3) << "Box of " << i.first
+                                 << " computed by: " << consumer.name << "\n";
+                        for (size_t k = 0; k < box.size(); k++)
+                            debug(3) << "  " << box[k].min << " ... " << box[k].max << "\n";
                         merge_boxes(boxes[i.first], box);
                     }
                 }
@@ -1038,6 +1048,7 @@ public:
                 // Use the output size of the first output buffer
                 buffer_name += ".0";
             }
+            debug(3) << "Box of " << buffer_name << ":\n";
             for (int d = 0; d < output.dimensions(); d++) {
                 Parameter buf = output.output_buffers()[0];
                 Expr min = Variable::make(Int(32), buffer_name + ".min." + std::to_string(d), buf);
@@ -1053,6 +1064,7 @@ public:
                 if (extent_constraint.defined()) {
                     extent = extent_constraint;
                 }
+                debug(3) << "  " << min << " ... " << extent << "\n";
 
                 output_box.push_back(Interval(min, (min + extent) - 1));
             }
@@ -1212,6 +1224,10 @@ public:
                 if (in_pipeline.count(stages[i].name)) {
                     bounds_needed[i] = false;
                 }
+
+                // if (stages[i].func.has_shift_reg()) {
+                //     bounds_needed[i] = false;
+                // }
 
                 if (bounds_needed[i]) {
                     for (int consumer : stages[i].consumers) {

@@ -5,6 +5,7 @@
 #include "CodeGen_C.h"
 #include "CodeGen_Internal.h"
 #include "Deinterleave.h"
+#include "DeviceArgument.h"
 #include "FindIntrinsics.h"
 #include "IROperator.h"
 #include "Lerp.h"
@@ -14,6 +15,7 @@
 #include "Type.h"
 #include "Util.h"
 #include "Var.h"
+#include "../../t2s/src/Utilities.h"
 
 namespace Halide {
 namespace Internal {
@@ -206,50 +208,59 @@ CodeGen_C::CodeGen_C(ostream &s, const Target &t, OutputKind output_kind, const 
 
         return;
     }
-
-    if (is_header()) {
-        // If it's a header, emit an include guard.
-        stream << "#ifndef HALIDE_" << c_print_name(guard) << "\n"
-               << "#define HALIDE_" << c_print_name(guard) << "\n"
-               << "#include <stdint.h>\n"
-               << "\n"
-               << "// Forward declarations of the types used in the interface\n"
-               << "// to the Halide pipeline.\n"
-               << "//\n";
-        if (target.has_feature(Target::NoRuntime)) {
-            stream << "// For the definitions of these structs, include HalideRuntime.h\n";
+    if (is_host_interface()) {
+        if (is_header()) {
+            stream << "#ifndef HALIDE_" << print_name(guard) << '\n'
+                   << "#define HALIDE_" << print_name(guard) << '\n';
+            stream << "#include \"AOT-OpenCL-Runtime.h\"" << '\n';
         } else {
-            stream << "// Definitions for these structs are below.\n";
+            stream << "#include \"" << guard << "\"" << '\n';
         }
-        stream << "\n"
-               << "// Halide's representation of a multi-dimensional array.\n"
-               << "// Halide::Runtime::Buffer is a more user-friendly wrapper\n"
-               << "// around this. Its declaration is in HalideBuffer.h\n"
-               << "struct halide_buffer_t;\n"
-               << "\n"
-               << "// Metadata describing the arguments to the generated function.\n"
-               << "// Used to construct calls to the _argv version of the function.\n"
-               << "struct halide_filter_metadata_t;\n"
-               << "\n";
-        // We just forward declared the following types:
-        forward_declared.insert(type_of<halide_buffer_t *>().handle_type);
-        forward_declared.insert(type_of<halide_filter_metadata_t *>().handle_type);
-    } else if (is_extern_decl()) {
-        // Extern decls to be wrapped inside other code (eg python extensions);
-        // emit the forward decls with a minimum of noise. Note that we never
-        // mess with legacy buffer types in this case.
-        stream << "struct halide_buffer_t;\n"
-               << "struct halide_filter_metadata_t;\n"
-               << "\n";
-        forward_declared.insert(type_of<halide_buffer_t *>().handle_type);
-        forward_declared.insert(type_of<halide_filter_metadata_t *>().handle_type);
     } else {
-        // Include declarations of everything generated C source might want
-        stream
-            << halide_c_template_CodeGen_C_prologue << "\n"
-            << halide_internal_runtime_header_HalideRuntime_h << "\n"
-            << halide_internal_initmod_inlined_c << "\n";
-        stream << "\n";
+        if (is_header()) {
+            // If it's a header, emit an include guard.
+            stream << "#ifndef HALIDE_" << c_print_name(guard) << "\n"
+                << "#define HALIDE_" << c_print_name(guard) << "\n"
+                << "#include <stdint.h>\n"
+                << "\n"
+                << "// Forward declarations of the types used in the interface\n"
+                << "// to the Halide pipeline.\n"
+                << "//\n";
+            if (target.has_feature(Target::NoRuntime)) {
+                stream << "// For the definitions of these structs, include HalideRuntime.h\n";
+            } else {
+                stream << "// Definitions for these structs are below.\n";
+            }
+            stream << "\n"
+                << "// Halide's representation of a multi-dimensional array.\n"
+                << "// Halide::Runtime::Buffer is a more user-friendly wrapper\n"
+                << "// around this. Its declaration is in HalideBuffer.h\n"
+                << "struct halide_buffer_t;\n"
+                << "\n"
+                << "// Metadata describing the arguments to the generated function.\n"
+                << "// Used to construct calls to the _argv version of the function.\n"
+                << "struct halide_filter_metadata_t;\n"
+                << "\n";
+            // We just forward declared the following types:
+            forward_declared.insert(type_of<halide_buffer_t *>().handle_type);
+            forward_declared.insert(type_of<halide_filter_metadata_t *>().handle_type);
+        } else if (is_extern_decl()) {
+            // Extern decls to be wrapped inside other code (eg python extensions);
+            // emit the forward decls with a minimum of noise. Note that we never
+            // mess with legacy buffer types in this case.
+            stream << "struct halide_buffer_t;\n"
+                << "struct halide_filter_metadata_t;\n"
+                << "\n";
+            forward_declared.insert(type_of<halide_buffer_t *>().handle_type);
+            forward_declared.insert(type_of<halide_filter_metadata_t *>().handle_type);
+        } else {
+            // Include declarations of everything generated C source might want
+            stream
+                << halide_c_template_CodeGen_C_prologue << "\n"
+                << halide_internal_runtime_header_HalideRuntime_h << "\n"
+                << halide_internal_initmod_inlined_c << "\n";
+            stream << "\n";
+        }
     }
 
     stream << kDefineMustUseResult << "\n";
@@ -265,7 +276,7 @@ CodeGen_C::~CodeGen_C() {
     set_name_mangling_mode(NameMangling::Default);
 
     if (is_header()) {
-        if (!target.has_feature(Target::NoRuntime)) {
+        if (!target.has_feature(Target::NoRuntime) && !is_host_interface()) {
             stream << "\n"
                    << "// The generated object file that goes with this header\n"
                    << "// includes a full copy of the Halide runtime so that it\n"
@@ -552,6 +563,67 @@ public:
         stream << "\n";
     }
 };
+
+class KernelStoresToMemory : public IRVisitor {
+    using IRVisitor::visit;
+public:
+    bool stores_to_memory;
+
+    KernelStoresToMemory() : stores_to_memory(false) {}
+
+    void visit(const Store *op) override {
+        stores_to_memory = true;
+        return;
+    }
+};
+
+string create_kernel_name(const For *op) {
+    // Remove already useless info from the loop name, so as to get a cleaner kernel name.
+    string loop_name = op->name;
+    string func_name = extract_first_token(loop_name);
+    string kernel_name = "kernel_" + func_name;
+
+    // If the kernel writes to memory, append "_WAIT_FINISH" so that the OpenCL runtime knows to wait for this
+    // kernel to finish.
+    KernelStoresToMemory checker;
+    op->body.accept(&checker);
+    if (checker.stores_to_memory) {
+        // TOFIX: overlay does not work well with this change of name
+        // kernel_name += "_WAIT_FINISH";
+    }
+
+    for (size_t i = 0; i < kernel_name.size(); i++) {
+        if (!isalnum(kernel_name[i])) {
+            kernel_name[i] = '_';
+        }
+    }
+    return kernel_name;
+}
+
+class GatherKernelInfo : public IRVisitor {
+    using IRVisitor::visit;
+private:
+    CodeGen_C* parent;
+public:
+    vector<string> kernel_names;
+
+    GatherKernelInfo() {}
+
+    void visit(const For *op) override {
+        if (ends_with(op->name, ".autorun.run_on_device")) {
+            string kernel_name = create_kernel_name(op);
+            debug(2) << kernel_name << " is an autorun kernel. Host side does not have to issue it.\n";
+            IRVisitor::visit(op);
+        } else if (ends_with(op->name, ".run_on_device")) {
+            string kernel_name = create_kernel_name(op);
+            debug(2) << "Gather kernel: " << kernel_name << "\n";
+            kernel_names.push_back(kernel_name);
+        } else {
+            IRVisitor::visit(op);
+        }
+    }
+};
+
 }  // namespace
 
 void CodeGen_C::forward_declare_type_if_needed(const Type &t) {
@@ -914,7 +986,7 @@ void CodeGen_C::compile(const Module &input) {
         stream << "\n";
     }
 
-    if (!is_header_or_extern_decl()) {
+    if (!is_header_or_extern_decl() && !is_host_interface()) {
         add_vector_typedefs(type_info.vector_types_used);
 
         // Emit prototypes for all external and internal-only functions.
@@ -939,6 +1011,28 @@ void CodeGen_C::compile(const Module &input) {
             set_name_mangling_mode(NameMangling::C);
             e.emit_c_declarations(stream);
         }
+    } else if (is_host_interface() && !is_header()) {
+        GatherKernelInfo g;
+        for (const auto &f : input.functions()) {
+            f.body.accept(&g);
+        }
+
+        stream << "int MAX_DEVICES = 4;\n"
+               << "int NUM_QUEUES_TO_CREATE = " << g.kernel_names.size() << ";\n"
+               << "int NUM_KERNELS_TO_CREATE = " << g.kernel_names.size() << ";\n"
+               << "cl_int status;\n"
+               << "cl_context context = NULL;\n"
+               << "cl_command_queue cmdQueue[" << g.kernel_names.size() + 1 << "]; // extra queue for reading buffer D\n"
+               << "cl_device_id devices[4];\n"
+               << "int current_kernel = 0;\n"
+               << "cl_kernel kernel[" << g.kernel_names.size() << "];\n\n";
+
+        stream << "const char *kernel_name[] = {\n";
+        for (auto name : g.kernel_names) {
+            stream << "    \"" << name << "\",\n";
+        }
+        stream << "};\n";
+
     }
 
     for (const auto &b : input.buffers()) {
@@ -1326,9 +1420,10 @@ void CodeGen_C::visit(const Mul *op) {
 
 void CodeGen_C::visit(const Div *op) {
     int bits;
+    char* ediv = getenv("EUCLIDEAN_DIVISION");
     if (is_const_power_of_two_integer(op->b, &bits)) {
         visit_binop(op->type, op->a, make_const(op->a.type(), bits), ">>");
-    } else if (op->type.is_int()) {
+    } else if (ediv && op->type.is_int()) {
         print_expr(lower_euclidean_div(op->a, op->b));
     } else {
         visit_binop(op->type, op->a, op->b, "/");
@@ -1337,9 +1432,10 @@ void CodeGen_C::visit(const Div *op) {
 
 void CodeGen_C::visit(const Mod *op) {
     int bits;
+    char* ediv = getenv("EUCLIDEAN_DIVISION");
     if (is_const_power_of_two_integer(op->b, &bits)) {
         visit_binop(op->type, op->a, make_const(op->a.type(), (1 << bits) - 1), "&");
-    } else if (op->type.is_int()) {
+    } else if (ediv && op->type.is_int()) {
         print_expr(lower_euclidean_mod(op->a, op->b));
     } else if (op->type.is_float()) {
         string arg0 = print_expr(op->a);
@@ -1759,6 +1855,8 @@ void CodeGen_C::visit(const Call *op) {
     } else if (op->is_intrinsic(Call::get_user_context)) {
         internal_assert(op->args.empty());
         rhs << "_ucon";
+    } else if (op->is_intrinsic(Call::read_field)) {
+        rhs << print_expr(op->args[0]) << ".f" << std::to_string((op->args[1]).as<IntImm>()->value);
     } else if (op->is_intrinsic(Call::stringify)) {
         // Rewrite to an snprintf
         vector<string> printf_args;
@@ -1841,6 +1939,10 @@ void CodeGen_C::visit(const Call *op) {
         internal_assert(op->args.size() == 1);
         string arg0 = print_expr(op->args[0]);
         rhs << "(" << arg0 << ")";
+    } else if (ends_with(op->name, ".temp")) {
+        rhs << print_name(op->name);
+    } else if (op->is_intrinsic(Call::annotate)) {
+        rhs << print_expr(0);
     } else if (op->is_intrinsic()) {
         Expr lowered = lower_intrinsic(op);
         if (lowered.defined()) {
@@ -2030,24 +2132,33 @@ void CodeGen_C::visit(const Let *op) {
 }
 
 void CodeGen_C::visit(const Select *op) {
-    ostringstream rhs;
-    string type = print_type(op->type);
-    string true_val = print_expr(op->true_value);
-    string false_val = print_expr(op->false_value);
-    string cond = print_expr(op->condition);
-
-    // clang doesn't support the ternary operator on OpenCL style vectors.
-    // See: https://bugs.llvm.org/show_bug.cgi?id=33103
-    if (op->condition.type().is_scalar()) {
-        rhs << "(" << type << ")"
-            << "(" << cond
-            << " ? " << true_val
-            << " : " << false_val
-            << ")";
+    if (is_host_interface()) {
+        // The branch(es) might contain actions with side effects like a channel read.
+        // Thus we must guard the branch(es).
+        // So first convert to if_then_else.
+        user_assert(op->condition.type().is_scalar());
+        Expr c = Call::make(op->type, Call::if_then_else, {op->condition, op->true_value, op->false_value}, Call::PureIntrinsic);
+        c.accept(this);
     } else {
-        rhs << type << "_ops::select(" << cond << ", " << true_val << ", " << false_val << ")";
+        ostringstream rhs;
+        string type = print_type(op->type);
+        string true_val = print_expr(op->true_value);
+        string false_val = print_expr(op->false_value);
+        string cond = print_expr(op->condition);
+
+        // clang doesn't support the ternary operator on OpenCL style vectors.
+        // See: https://bugs.llvm.org/show_bug.cgi?id=33103
+        if (op->condition.type().is_scalar()) {
+            rhs << "(" << type << ")"
+                << "(" << cond
+                << " ? " << true_val
+                << " : " << false_val
+                << ")";
+        } else {
+            rhs << type << "_ops::select(" << cond << ", " << true_val << ", " << false_val << ")";
+        }
+        print_assignment(op->type, rhs.str());
     }
-    print_assignment(op->type, rhs.str());
 }
 
 Expr CodeGen_C::scalarize_vector_reduce(const VectorReduce *op) {
@@ -2207,30 +2318,76 @@ void CodeGen_C::visit(const Atomic *op) {
 }
 
 void CodeGen_C::visit(const For *op) {
-    string id_min = print_expr(op->min);
-    string id_extent = print_expr(op->extent);
+    if (!ends_with(op->name, ".run_on_device")) {
+        string id_min = print_expr(op->min);
+        string id_extent = print_expr(op->extent);
 
-    if (op->for_type == ForType::Parallel) {
-        stream << get_indent() << "#pragma omp parallel for\n";
-    } else {
-        internal_assert(op->for_type == ForType::Serial)
-            << "Can only emit serial or parallel for loops to C\n";
+        if (op->for_type == ForType::Parallel) {
+            stream << get_indent() << "#pragma omp parallel for\n";
+        } else {
+            internal_assert(op->for_type == ForType::Serial ||
+                            op->for_type == ForType::PragmaUnrolled ||
+                            op->for_type == ForType::Unrolled)
+                << "Can only emit serial or parallel for loops to C\n";
+        }
+
+        stream << get_indent() << "for (int "
+            << print_name(op->name)
+            << " = " << id_min
+            << "; "
+            << print_name(op->name)
+            << " < " << id_min
+            << " + " << id_extent
+            << "; "
+            << print_name(op->name)
+            << "++)\n";
+
+        open_scope();
+        op->body.accept(this);
+        close_scope("for " + print_name(op->name));
+    } else if (!ends_with(op->name, ".autorun.run_on_device")) {
+        // Only set args for non-autorun kernels
+        debug(2) << "Set kernel args: " << op->name << "\n";
+        debug(4) << op->body << "\n";
+
+        // compute a closure over the state passed into the kernel
+        HostClosure c;
+
+        // Determine the arguments that must be passed into the halide function
+        vector<DeviceArgument> closure_args = c.arguments();
+
+        // Sort the args by the size of the underlying type. This is
+        // helpful for avoiding struct-packing ambiguities in metal,
+        // which passes the scalar args as a struct.
+        std::sort(closure_args.begin(), closure_args.end(),
+                  [](const DeviceArgument &a, const DeviceArgument &b) {
+                      if (a.is_buffer != b.is_buffer) {
+                          return a.is_buffer < b.is_buffer;
+                      } else if (a.type == b.type) {
+                          return a.type.bits() > b.type.bits();
+                      } else {
+                          return a.type.is_float() < b.type.is_float();
+                      }
+                  });
+
+        for (size_t i = 0; i < closure_args.size(); i++) {
+            auto &arg = closure_args[i];
+            stream << get_indent() << "status = clSetKernelArg("
+                   << "kernel[current_kernel], "
+                   << i << ", ";
+            if (arg.is_buffer) {
+                stream << "sizeof(cl_mem), "
+                       << "(void *)&((device_handle *)_halide_buffer_get_device(" << print_name(arg.name + ".buffer") << "))->mem";
+            } else {
+                stream << "sizeof(" << print_type(arg.type) << "), "
+                       << "(void *)&" << print_name(arg.name);
+            }
+            stream << ");\n"
+                   << get_indent() << "CHECK(status);\n";
+        }
+
+        stream << get_indent() << "current_kernel++;\n\n";
     }
-
-    stream << get_indent() << "for (int "
-           << print_name(op->name)
-           << " = " << id_min
-           << "; "
-           << print_name(op->name)
-           << " < " << id_min
-           << " + " << id_extent
-           << "; "
-           << print_name(op->name)
-           << "++)\n";
-
-    open_scope();
-    op->body.accept(this);
-    close_scope("for " + print_name(op->name));
 }
 
 void CodeGen_C::visit(const Ramp *op) {
@@ -2254,7 +2411,15 @@ void CodeGen_C::visit(const Broadcast *op) {
 }
 
 void CodeGen_C::visit(const Provide *op) {
-    internal_error << "Cannot emit Provide statements as C\n";
+    if (ends_with(op->name, ".temp")) {
+    	internal_assert(op->values.size() == 1);
+        internal_assert(op->args.size() == 0);
+        string value = print_expr(op->values[0]);
+        string name = print_name(op->name);
+        stream << get_indent() << name << " = " << value << ";\n";
+    } else {
+        internal_error << "Cannot emit Provide statements as C\n";
+    }
 }
 
 void CodeGen_C::visit(const Allocate *op) {
@@ -2347,8 +2512,12 @@ void CodeGen_C::visit(const Allocate *op) {
         stream << get_indent() << op_type;
 
         if (on_stack) {
-            stream << op_name
-                   << "[" << size_id << "];\n";
+            if (is_host_interface() && ends_with(op->name, ".temp")) {
+                stream << op_name << ";\n";
+            } else {
+                stream << op_name
+                       << "[" << size_id << "];\n";
+            }
         } else {
             // Shouldn't ever currently be possible to have !on_stack && size_id.empty(),
             // but reality-check in case things change in the future.
@@ -2414,7 +2583,11 @@ void CodeGen_C::visit(const Free *op) {
 }
 
 void CodeGen_C::visit(const Realize *op) {
-    internal_error << "Cannot emit realize statements to C\n";
+    if (is_host_interface()) {
+        op->body.accept(this);
+    } else {
+        internal_error << "Cannot emit realize statements to C\n";
+    }
 }
 
 void CodeGen_C::visit(const Prefetch *op) {
@@ -2441,8 +2614,15 @@ void CodeGen_C::visit(const Evaluate *op) {
     if (is_const(op->value)) {
         return;
     }
+    bool skip_eval = false;
+    if (auto call = op->value.as<Call>()) {
+        if (call->is_intrinsic(Call::overlay) || call->is_intrinsic(Call::overlay_switch) || call->is_intrinsic(Call::annotate))
+            skip_eval = true;
+    }
     string id = print_expr(op->value);
-    stream << get_indent() << "halide_maybe_unused(" << id << ");\n";
+    if (!skip_eval) {
+        stream << get_indent() << "halide_maybe_unused(" << id << ");\n";
+    }
 }
 
 void CodeGen_C::visit(const Shuffle *op) {

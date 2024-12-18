@@ -354,17 +354,24 @@ void CodeGen_Posix::visit(const Allocate *alloc) {
         user_error << "Can't have two different buffers with the same name: "
                    << alloc->name << "\n";
     }
+    if (ends_with(alloc->name, ".temp")) {
+        AllocaInst *alloca_temp = builder->CreateAlloca(i32_t, NULL, alloc->name);
+        alloca_temp->setAlignment(llvm::Align((int)sizeof(halide_scalar_value_t)));
+        sym_push(alloc->name, alloca_temp);
+        codegen(alloc->body);
+        sym_pop(alloc->name);
+    } else {
+        Allocation allocation = create_allocation(alloc->name, alloc->type, alloc->memory_type,
+                                                alloc->extents, alloc->condition,
+                                                alloc->new_expr, alloc->free_function, alloc->padding);
+        sym_push(alloc->name, allocation.ptr);
 
-    Allocation allocation = create_allocation(alloc->name, alloc->type, alloc->memory_type,
-                                              alloc->extents, alloc->condition,
-                                              alloc->new_expr, alloc->free_function, alloc->padding);
-    sym_push(alloc->name, allocation.ptr);
+        codegen(alloc->body);
 
-    codegen(alloc->body);
-
-    // If there was no early free, free it now.
-    if (allocations.contains(alloc->name)) {
-        free_allocation(alloc->name);
+        // If there was no early free, free it now.
+        if (allocations.contains(alloc->name)) {
+            free_allocation(alloc->name);
+        }
     }
 }
 

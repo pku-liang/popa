@@ -115,7 +115,10 @@ Expr IRMutator::visit(const Not *op) {
 Expr IRMutator::visit(const Select *op) {
     Expr cond = mutate(op->condition);
     Expr t = mutate(op->true_value);
-    Expr f = mutate(op->false_value);
+    Expr f;
+    if (op->false_value.defined()) {
+        f = mutate(op->false_value);
+    }
     if (cond.same_as(op->condition) &&
         t.same_as(op->true_value) &&
         f.same_as(op->false_value)) {
@@ -292,6 +295,11 @@ Stmt IRMutator::visit(const Prefetch *op) {
 Stmt IRMutator::visit(const Block *op) {
     Stmt first = mutate(op->first);
     Stmt rest = mutate(op->rest);
+
+    if (!first.defined())
+        return rest;
+    if (!rest.defined())
+        return first;
     if (first.same_as(op->first) &&
         rest.same_as(op->rest)) {
         return op;

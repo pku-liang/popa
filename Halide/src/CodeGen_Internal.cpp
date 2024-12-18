@@ -98,6 +98,7 @@ bool function_takes_user_context(const std::string &name) {
         "_halide_buffer_retire_crop_after_extern_stage",
         "_halide_buffer_retire_crops_after_extern_stage",
         "_halide_hexagon_do_par_for",
+        "halide_opencl_wait_for_kernels_finish",
     };
     for (const char *user_context_runtime_func : user_context_runtime_funcs) {
         if (name == user_context_runtime_func) {
@@ -114,6 +115,8 @@ bool can_allocation_fit_on_stack(int64_t size) {
 }
 
 Expr lower_int_uint_div(const Expr &a, const Expr &b, bool round_to_zero) {
+    internal_assert(!a.type().is_complex());
+    internal_assert(!b.type().is_complex());
     // Detect if it's a small int division
     internal_assert(a.type() == b.type());
     const int64_t *const_int_divisor = as_const_int(b);
@@ -261,6 +264,8 @@ Expr lower_int_uint_div(const Expr &a, const Expr &b, bool round_to_zero) {
 }
 
 Expr lower_int_uint_mod(const Expr &a, const Expr &b) {
+    internal_assert(!a.type().is_complex());
+    internal_assert(!b.type().is_complex());
     // Detect if it's a small int modulus
     const int64_t *const_int_divisor = as_const_int(b);
     const uint64_t *const_uint_divisor = as_const_uint(b);

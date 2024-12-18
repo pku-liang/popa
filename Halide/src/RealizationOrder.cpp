@@ -152,7 +152,7 @@ void populate_fused_pairs_list(const string &func, const Definition &def,
     auto iter = env.find(fuse_level.func());
     user_assert(iter != env.end())
         << "Illegal compute_with: \"" << func << "\" is scheduled to be computed with \""
-        << fuse_level.func() << "\" which is not used anywhere.\n";
+        << fuse_level.func() << "\", which is not used anywhere.\n";
 
     Function &parent = iter->second;
     user_assert(!parent.has_extern_definition())
@@ -293,6 +293,155 @@ map<string, uint64_t> compute_visitation_order(const vector<Function> &outputs) 
     return result;
 }
 
+vector<Func> find_all_merged_ures(string func_name, const map<string, vector<string>> &merge_relation,
+                                  map<string, Function> &env, set<string> &visitied) {
+    internal_assert(env.find(func_name) != env.end());
+    user_assert(visitied.find(func_name) == visitied.end()) << "The merge relationship can contain loop\n";
+    Function &func = env.at(func_name);
+    visitied.insert(func_name);
+
+    vector<Func> total_ures;
+    for (Func& merged_func : func.definition().schedule().merged_ures()) {
+        total_ures.push_back(merged_func);
+        if (merge_relation.find(merged_func.name()) != merge_relation.end()) {
+            vector<Func> this_total_ures = find_all_merged_ures(merged_func.name(), merge_relation, env, visitied);
+            total_ures.insert(total_ures.end(), this_total_ures.begin(), this_total_ures.end());
+        }
+    }
+    return total_ures;
+}
+
+void clear_out_merged_ures(map<string, Function> &env) {
+    map<string, vector<string>> merge_relation;
+    map<string, string> reverse_merge_relation;
+    for (auto element : env) {
+        string func_name = element.first;
+        const Function &func = element.second;
+        if (func.has_merged_defs()) {
+            vector<string> merged_func_names = func.merged_func_names();
+            for (string name : merged_func_names) {
+                user_assert(env.find(name) != env.end()) << "The merged URE " << name
+                        << " is not used in the final output.";
+                user_assert(reverse_merge_relation.find(name) == reverse_merge_relation.end())
+                    << "Func " << name << " is merged more than once.\n";
+                reverse_merge_relation[name] = func_name;
+                merge_relation[func_name] = merged_func_names;
+            }
+        }
+    }
+
+    for (auto element : env) {
+        string func_name = element.first;
+        Function &func = element.second;
+        if (func.has_merged_defs() &&
+            reverse_merge_relation.find(func_name) == reverse_merge_relation.end()) {
+            // This is a control URE
+            set<string> visitied;
+            vector<Func> &merged_ures = func.definition().schedule().merged_ures();
+            vector<Func> all_merged_ures = find_all_merged_ures(func_name, merge_relation, env, visitied);
+            merged_ures.clear();
+            for (Func& ure : all_merged_ures) {
+                merged_ures.push_back(ure);
+                ure.function().definition().schedule().merged_ures().clear();
+                env.at(ure.name()).definition().schedule().merged_ures().clear();
+            }
+
+            internal_assert(env[func_name].has_merged_defs());
+        }
+    }
+}
+
+map<string, vector<string>> find_and_insert_merge_group(map<string, vector<string>> &graph,
+    map<string, string> &group_name, const map<string, Function> &env) {
+    map<string, vector<string>> merged_order;
+    map<string, string> delete_node_to_merge_group;
+    for (auto element : env) {
+        const Function &func = element.second;
+        if (func.has_merged_defs()) {
+            vector<string> merged_func_names = func.merged_func_names();
+            string group;
+            set<string> deleted_node;
+            vector<string> output_func_names;
+            for (auto func_name : merged_func_names) {
+                if (env.find(func_name) != env.end()) {
+                    const Function &f = env.at(func_name);
+                    if (f.definition().schedule().is_output()) {
+                        if (group == "") {
+                            group = group_name[func_name];
+                        } else {
+                            user_assert(group == group_name[func_name]);
+                        }
+                        deleted_node.insert(func_name);
+                        output_func_names.push_back(func_name);
+                    }
+                }
+                
+            }
+            for (auto func_name : output_func_names) {
+                merged_func_names.erase(find(merged_func_names.begin(), merged_func_names.end(), func_name));
+            }
+            
+            merged_func_names.insert(merged_func_names.begin(), element.first);
+            
+            for (string merged_name : merged_func_names) {
+                string group2 = group_name[merged_name];
+                user_assert(group == group2) << "Func " << merged_name << " and output Func are merged together, but have different compute_with group\n";
+                graph.erase(merged_name);
+                deleted_node.insert(merged_name);
+            }
+
+            // vector<string> new_func_links;
+            // for (string name : graph[pair.first]) {
+            //     if (deleted_node.find(name) == deleted_node.end()) {
+            //         new_func_links.push_back(name);
+            //     }
+            // }
+            // graph[pair.first] = new_func_links;
+
+            vector<string> new_group_links;
+            for (string name : graph[group]) {
+                if (deleted_node.find(name) == deleted_node.end()) {
+                    new_group_links.push_back(name);
+                }
+            }
+            graph[group] = new_group_links;
+
+            string merged_group_name = unique_name("_mg");
+            graph[merged_group_name] = {group};
+            group_name[merged_group_name] = group;
+            for (auto name : output_func_names) {
+                graph[name] = {group, merged_group_name};
+            }
+
+            merged_order[merged_group_name] = merged_func_names;
+
+            for (string node : merged_func_names) {
+                delete_node_to_merge_group[node] = merged_group_name;
+            }
+        }
+    }
+
+    for (auto element : graph) {
+        if (delete_node_to_merge_group.empty())
+            break;
+        vector<string> new_links;
+        for (string link : element.second) {
+            set<string> link_to_group;
+            if (delete_node_to_merge_group.find(link) == delete_node_to_merge_group.end()) {
+                new_links.push_back(link);
+            } else {
+                string merge_group = delete_node_to_merge_group[link];
+                if (link_to_group.find(merge_group) == link_to_group.end()) {
+                    new_links.push_back(merge_group);
+                    link_to_group.insert(merge_group);
+                }
+            }
+        }
+        graph[element.first] = new_links;
+    }
+    return merged_order;
+}
+
 pair<vector<string>, vector<vector<string>>> realization_order(
     const vector<Function> &outputs, map<string, Function> &env) {
 
@@ -379,6 +528,11 @@ pair<vector<string>, vector<vector<string>>> realization_order(
         sort_funcs_by_name_and_counter(&p.second, env, visitation_order);
     }
 
+    // To get the right realization order of merged UREs.
+    clear_out_merged_ures(env);
+    map<string, vector<string>> merged_order = 
+        find_and_insert_merge_group(graph, group_name, env);
+
     // Compute the realization order of the fused groups (i.e. the dummy nodes)
     // and also the realization order of the functions within a fused group.
     vector<string> temp;
@@ -387,6 +541,18 @@ pair<vector<string>, vector<vector<string>>> realization_order(
     for (const Function &f : outputs) {
         if (visited.find(f.name()) == visited.end()) {
             realization_order_dfs(f.name(), graph, visited, result_set, temp);
+        }
+    }
+
+    vector<string> before_merge = temp;
+    temp.clear();
+    for (string name : before_merge) {
+        if (merged_order.find(name) != merged_order.end()) {
+            for (string merged_name: merged_order[name]) {
+                temp.push_back(merged_name);
+            }
+        } else {
+            temp.push_back(name);
         }
     }
 

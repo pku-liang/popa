@@ -1679,6 +1679,7 @@ struct SelectOp {
         const Select &op = (const Select &)e;
         return (c.template match<bound>(*op.condition.get(), state) &&
                 t.template match<bound | bindings<C>::mask>(*op.true_value.get(), state) &&
+                op.false_value.defined() &&
                 f.template match<bound | bindings<C>::mask | bindings<T>::mask>(*op.false_value.get(), state));
     }
     template<uint32_t bound, typename C2, typename T2, typename F2>

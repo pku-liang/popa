@@ -947,6 +947,21 @@ class StorageFolding : public IRMutator {
     using IRMutator::visit;
 
     Stmt visit(const Realize *op) override {
+        if (ends_with(op->name, ".channel")
+            || ends_with(op->name, ".mem_channel")
+            || ends_with(op->name, ".shreg")
+            || ends_with(op->name, ".temp")) {
+            // Skip storage folding for a channel array.
+            Stmt body = mutate(op->body);
+            debug(3) << "Not attempting to fold " << op->name << " because it is a channel.\n";
+            if (body.same_as(op->body)) {
+                return op;
+            } else {
+                Stmt stmt = Realize::make(op->name, op->types, op->memory_type, op->bounds, op->condition, body);
+                return stmt;
+            }
+        }
+
         Stmt body = mutate(op->body);
 
         // Get the function associated with this realization, which

@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "Argument.h"
 #include "DeviceAPI.h"
 #include "Expr.h"
 #include "FunctionPtr.h"
@@ -21,6 +22,85 @@ namespace Halide {
 
 class Func;
 struct VarOrRVar;
+
+/** Place where a Func is run.
+ * ISSUE: for now, we assume a single host and device.
+ *        We need revisit this assumption when we extend
+ *        to multiple hosts and devices of possibly multiple
+ *        types.
+ */
+enum class Place {
+    /** Run on the host (i.e. CPU). */
+    Host,
+
+    /** Run on a device */
+    Device
+};
+
+enum class SpaceTimeTransform {
+    /* Generate a check for each PE if its times come to execute. */
+    CheckTime,
+
+    /* Do not generate a check for each PE if its times come to execute. It
+     * is up to the programmer to ensure that the UREs already contain such
+     * a check. */
+    NoCheckTime
+};
+
+/** Different ways to scatter data. */
+enum class ScatterStrategy {
+    /** Scatter data up along a loop. That is, scatter from iteration 0
+     * to iteration 1, then from iteration 1 to iteration 2, etc.*/
+    Up,
+
+    /** Scatter data down along a loop. That is, scatter from the last iteration N
+     * to iteration N-1, then from iteration N-1 to iteration N-2, etc.*/
+    Down,
+
+    FPGAReg,
+
+    /** Scatter a vector of data along a loop. Suppose a producer has l0 PEs and a
+     * consumer has l1 banks. This strategy scatters a vector of l0 elements along
+     * l1 banks, which makes the banks written in parallel with their own data. */
+    ForwardVector,
+
+    /** TODO: add some other scattering styles, e.g. tree style. */
+};
+
+/** Different ways to gather data. */
+enum class GatherStrategy {
+    /** Gather data up along a loop. That is, gather from iteration 0
+     * to iteration 1, then from iteration 1 to iteration 2, etc.*/
+    Up,
+
+    /** Gather data down along a loop. That is, gather from the last iteration N
+     * to iteration N-1, then from iteration N-1 to iteration N-2, etc.*/
+    Down,
+
+    FPGAReg
+
+    /** TODO: add some other gathering styles, e.g. tree style. */
+};
+
+
+/** Different ways to buffer data. */
+enum class BufferStrategy {
+    /** buffer data with a single buffer.*/
+    Single,
+
+    /** buffer data with a double buffer*/
+    Double
+   
+};
+
+enum class BufferReadStrategy {
+    /** buffer data with a single buffer.*/
+    Block,
+
+    /** buffer data with a double buffer*/
+    NB
+   
+};
 
 namespace Internal {
 class Function;
@@ -579,6 +659,145 @@ struct FusedPair {
     }
 };
 
+struct FetchParams {
+    std::string store_at;
+    MemoryType store_in;
+    size_t rw_len;
+    std::vector<std::string> out_dims;
+    std::vector<Expr> reuse_args;
+};
+ 
+struct StoreParams {
+    std::vector<Expr> shape_args;
+    std::string name;
+    size_t rw_len;
+};
+ 
+
+struct SpaceTimeTransformParams {
+    size_t num_space_vars;
+    std::vector<int> sch_vector;
+    std::vector<std::string> src_vars;
+    std::vector<std::string> dst_vars;
+    std::vector<std::vector<int>> proj_matrix;
+    std::map<std::string, Expr> reverse;
+    SpaceTimeTransform check_time;
+    // The following field records the original specification, without any processing (In comparison, the above fields
+    // like sch_vector, proj_matrix, etc. could have been processed to be different from the original specification. See
+    // PreprocessBeforeLower.cpp).
+    bool sch_vector_specified;     // If false, a scheduling vector was not actually specified, so this is an "unscheduled"
+                                   // stt, and the above sch_vector is what compiler automatically makes.
+};
+
+struct TriangularLoopParams {
+    std::string outer_loop_name;
+    std::string inner_loop_name;
+    int safelen;
+};
+
+struct LateFuseParams {
+    std::string late_fuse_level;
+    int v_outs;
+};
+
+class PartitionItem{
+public:
+    std::string consumer;
+    std::string loop_name;
+    int num_partitions;
+    int stride;
+    PartitionItem(std::string _consumer, std::string _loop_name, int _num_partitions, int _stride):
+        consumer(_consumer), loop_name(_loop_name), num_partitions(_num_partitions), stride(_stride) {}
+};
+
+/** Record arguments for each invocation. */
+class ScatterItem{
+public:
+    std::string func_name;
+    std::string loop_name;
+    ScatterStrategy strategy;
+    ScatterItem(std::string _func_name, std::string _loop_name, ScatterStrategy _strategy):
+        func_name(_func_name),
+        loop_name(_loop_name),
+        strategy(_strategy){}
+};
+
+/** Record arguments for each invocation. */
+class GatherItem{
+public:
+    std::string func_name;
+    std::string loop_name;
+    GatherStrategy strategy;
+    bool valid = false;
+    GatherItem (std::string _func_name, std::string _loop_name, GatherStrategy _strategy){
+        func_name = _func_name;
+        loop_name = _loop_name;
+        strategy = _strategy;
+        valid = true;
+    }
+};
+
+class RelayItem {
+public:
+    std::string from_func;
+    std::string to_func;
+    std::string bank_loop;
+    RelayItem(std::string _from_func, std::string _to_func, std::string _bank_loop)
+        : from_func(_from_func), to_func(_to_func), bank_loop(_bank_loop) {}
+};
+
+class BufferItem{
+public:
+    std::string func_name;
+    std::string loop_name;
+    BufferStrategy strategy;
+    BufferReadStrategy read_strategy;
+    BufferItem(std::string _func_name,
+                std::string _loop_name,
+                BufferStrategy _strategy,BufferReadStrategy _read_strategy):
+                func_name(_func_name),loop_name(_loop_name),strategy(_strategy),read_strategy(_read_strategy){}
+};
+
+// Parallel Access Buffer
+class AddressableBufferItem {
+public:
+    std::string func_name;
+    std::string buffer_loop;
+    std::vector<Expr> write_indices;
+    std::vector<Expr> read_indices;
+    BufferStrategy strategy;
+    AddressableBufferItem(std::string _func_name, std::string _buffer_loop,
+                      std::vector<Expr> &_write_indices, std::vector<Expr> &_read_indices,
+                      BufferStrategy _strategy):
+                      func_name(_func_name), buffer_loop(_buffer_loop),
+                      write_indices(_write_indices), read_indices(_read_indices),
+                      strategy(_strategy) {}
+};
+
+class CmdQueueItem {
+public:
+    int queueNo;                           // command queue index
+    bool valid = false;                    // prevent command queue redefined
+    bool in_place;                          // reusing one of the input buffers as output buffer 
+    /* command queue symbolic args */
+    std::vector<Argument> args;
+
+    // Constructor
+    CmdQueueItem() = default;
+    CmdQueueItem(int _queueNo, std::vector<Argument> &_input_args, std::vector<Argument> &_inout_args) {
+        queueNo = _queueNo;
+        // Push the formal arguments into function definition
+        for (auto &arg : _input_args) {
+            args.push_back(arg);
+        }
+        for (auto &arg : _inout_args) {
+            args.push_back(arg);
+        }
+        in_place = (_inout_args.size() > 0);
+        valid = true;
+    }
+};
+
 struct FuncScheduleContents;
 struct StageScheduleContents;
 struct FunctionContents;
@@ -678,9 +897,11 @@ public:
     const LoopLevel &store_level() const;
     const LoopLevel &compute_level() const;
     const LoopLevel &hoist_storage_level() const;
+    const LateFuseParams &late_fuse_params() const;
     LoopLevel &store_level();
     LoopLevel &compute_level();
     LoopLevel &hoist_storage_level();
+    LateFuseParams &late_fuse_params();
     // @}
 
     /** Pass an IRVisitor through to all Exprs referenced in the
@@ -771,6 +992,128 @@ public:
     // @{
     const std::vector<FusedPair> &fused_pairs() const;
     std::vector<FusedPair> &fused_pairs();
+
+    /** UREs merged into this Func. For example,
+     \code
+     Func f, g, h;
+     f(...) = ...;
+     g(...) = ...;
+     h(...) = ...;
+     h.merge_ures(f, g);
+     \endcode
+     Then Func h's merged_ures is {f, g}.
+    */
+    // @{
+    const std::vector<Func> &merged_ures() const;
+    std::vector<Func> &merged_ures();
+    bool &is_merged();
+    const bool &is_merged() const;
+    // @}
+
+    bool &is_remove();
+    bool has_stt() const;
+    bool has_fetch() const;
+    bool has_store() const;
+    bool has_prefetch() const;
+    FetchParams &fetch_params();
+    const FetchParams &fetch_params() const;
+    StoreParams &store_params();
+    const StoreParams &store_params() const;
+
+    /** Merged Functions */
+    const std::vector<Function> merged_funcs() const;
+
+    /**
+     * insert buffer into the Func
+     */
+    // @{
+    const std::vector<BufferItem> &buffer_params() const;
+    std::vector<BufferItem> &buffer_params();
+    // @}
+
+    /**
+     * insert parallel access buffer into the Func
+     */
+    // @{
+    const std::vector<AddressableBufferItem> &addressable_buffer_params() const;
+    std::vector<AddressableBufferItem> &addressable_buffer_params();
+    // @}
+
+    /**
+     * scattering through channel
+     */
+    // @{
+    const std::vector<ScatterItem> &scatter_params() const;
+    std::vector<ScatterItem> &scatter_params();
+    // @}
+
+    /**
+     * partitioning memory channels
+     */
+    // @{
+    const std::vector<PartitionItem> &partition_params() const;
+    std::vector<PartitionItem> &partition_params();
+    // @}
+
+
+    /**
+     * gathering through channel
+     */
+    // @{
+    const std::vector<GatherItem> &gather_params() const;
+    std::vector<GatherItem> &gather_params();
+    // @}
+
+    const std::vector<RelayItem> &relay_params() const;
+    std::vector<RelayItem> &relay_params();
+    
+    /**
+     * specifying the command queue
+     */
+    // @{
+    const std::vector<CmdQueueItem> &cmd_params() const;
+    std::vector<CmdQueueItem> &cmd_params();
+    // @}
+
+    /**
+     * task dependency
+     */
+    // @{
+    const std::map<int, std::vector<Expr>> &task_deps() const;
+    std::map<int, std::vector<Expr>> &task_deps();
+    // @}
+
+    /**
+     * for loop removal
+     */
+    // @{
+    const std::vector<std::string> &remove_params() const;
+    std::vector<std::string> &remove_params();
+    // @}
+
+    /** This flag is set to true if use exetended ure syntax */
+    // @{
+    bool is_extended_ure() const;
+    bool &is_extended_ure();
+    // @}
+
+    const std::vector<TriangularLoopParams> &triangular_loop_params() const;
+    std::vector<TriangularLoopParams> &triangular_loop_params();
+
+    /** Space time transform parameters **/
+    const std::vector<SpaceTimeTransformParams> &transform_params() const;
+    std::vector<SpaceTimeTransformParams> &transform_params();
+    bool &is_input();
+    const bool &is_input() const;
+    bool &is_output();
+    const bool &is_output() const;
+
+    /** This flag is set to true if the is image param funcion,
+     *  whose name is end with _im*/
+    // @{
+        bool &is_param_func();
+        bool is_param_func() const;
+    // @}
 
     /** Are race conditions permitted? */
     // @{

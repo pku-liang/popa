@@ -12,6 +12,8 @@
 #include "Simplify.h"
 #include "Substitute.h"
 
+#include "../../t2s/src/Utilities.h"
+
 #include <sstream>
 
 namespace Halide {
@@ -97,6 +99,8 @@ private:
     };
 
     const map<string, pair<Function, int>> &env;
+    std::map<std::string, Expr> global_min;
+    std::map<std::string, Expr> global_max;
     set<string> outputs;
     set<string> textures;
     const Target &target;
@@ -191,6 +195,22 @@ private:
     }
 
     Stmt visit(const Realize *op) override {
+        // if it is realizing a channel array, skip it so as to pass the channel info the subsequent OpenCL code generator.
+        if (ends_with(op->name, ".channel") ||
+            ends_with(op->name, ".mem_channel") ||
+            ends_with(op->name, ".shreg") ||
+            ends_with(op->name, ".temp") ||
+            ends_with(op->name, ".ibuffer")) {
+            Stmt body = mutate(op->body);
+            debug(4) << "Not attempting to flatten " << op->name << " because it is a channel/shift register.\n";
+            if (body.same_as(op->body)) {
+                return op;
+            } else {
+                Stmt stmt = Realize::make(op->name, op->types, op->memory_type, op->bounds, op->condition, body);
+                return stmt;
+            }
+        }
+
         realizations.push(op->name);
 
         if (op->memory_type == MemoryType::GPUTexture) {
@@ -201,9 +221,23 @@ private:
         Stmt body = mutate(op->body);
 
         // Compute the size
+        vector<Expr> mins(op->bounds.size());
         vector<Expr> extents(op->bounds.size());
         for (size_t i = 0; i < op->bounds.size(); i++) {
-            extents[i] = mutate(op->bounds[i].extent);
+            auto min = op->bounds[i].min;
+            auto extent = op->bounds[i].extent;
+            if (min.as<IntImm>() == nullptr && !global_max.empty()) {
+                Expr max_substitute = substitute(global_max, min);
+                Expr min_substitute = substitute(global_min, min);
+                min = Min::make(max_substitute, min_substitute);
+            }
+            if (extent.as<IntImm>() == nullptr && !global_max.empty()) {
+                Expr max_substitute = substitute(global_max, extent);
+                Expr min_substitute = substitute(global_min, extent);
+                extent = Max::make(max_substitute, min_substitute);
+            }
+            mins[i] = mutate(min);
+            extents[i] = mutate(extent);
         }
         Expr condition = mutate(op->condition);
 
@@ -361,7 +395,7 @@ private:
 
         // Assign the mins and extents stored
         for (size_t i = op->bounds.size(); i > 0; i--) {
-            stmt = LetStmt::make(min_name[i - 1], op->bounds[i - 1].min, stmt);
+            stmt = LetStmt::make(min_name[i - 1], mins[i - 1], stmt);
             stmt = LetStmt::make(extent_name[i - 1], extents[i - 1], stmt);
         }
 
@@ -369,6 +403,15 @@ private:
     }
 
     Stmt visit(const Provide *op) override {
+        if (ends_with(op->name, ".temp")) {
+            // Not to flatten args. Code generator will generate code as is.
+            vector<Expr> values;
+            for (auto v : op->values) {
+                values.push_back(mutate(v));
+            }
+            return Provide::make(op->name, values, op->args, op->predicate);
+        }
+
         internal_assert(op->values.size() == 1);
 
         Parameter output_buf;
@@ -535,6 +578,19 @@ private:
     }
 
     Stmt visit(const For *op) override {
+        Expr min = op->min;
+        Expr extent = op->extent;
+        if (extent.as<IntImm>() == nullptr && !global_max.empty()) {
+            Expr max_substitute = substitute(global_max, extent);
+            Expr min_substitute = substitute(global_min, extent);
+            extent = Max::make(max_substitute, min_substitute);
+            max_substitute = substitute(global_max, min);
+            min_substitute = substitute(global_min, min);
+            min = Min::make(max_substitute, min_substitute);
+        }
+        global_max[extract_last_token(op->name)] = simplify(extent);
+        global_min[extract_last_token(op->name)] = simplify(min);
+
         Expr expanded_min = op->min;
         Expr expanded_extent = op->extent;
         // Iterate from innermost outwards

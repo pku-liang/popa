@@ -1,12 +1,15 @@
 #include <map>
+#include <queue>
 
 #include "CSE.h"
 #include "IREquality.h"
+#include "IRMatch.h"
 #include "IRMutator.h"
 #include "IROperator.h"
 #include "IRVisitor.h"
 #include "Scope.h"
 #include "Simplify.h"
+#include "../../t2s/src/Utilities.h"
 
 namespace Halide {
 namespace Internal {
@@ -15,6 +18,8 @@ using std::map;
 using std::pair;
 using std::string;
 using std::vector;
+using std::set;
+using std::queue;
 
 namespace {
 
@@ -188,18 +193,183 @@ public:
 class RemoveLets : public IRGraphMutator {
     using IRGraphMutator::visit;
 
-    Scope<Expr> scope;
+public:
+    // By default, remove Lets unconditionally.
+    RemoveLets() :
+        remove_Lets(true), remove_LetStmts(false), funcs_only(false), serial_loop_only(false) {
+        path_condition = const_true();
+    }
 
-    Expr visit(const Variable *op) override {
-        if (const Expr *e = scope.find(op->name)) {
-            return *e;
+    RemoveLets(bool remove_Lets, bool remove_LetStmts, bool funcs_only,
+               bool serial_loop_only, const set<string> &funcs) :
+        remove_Lets(remove_Lets), remove_LetStmts(remove_LetStmts), funcs_only(funcs_only),
+        serial_loop_only(serial_loop_only), funcs(funcs) {
+        in_replacable_func = false;
+        in_serial_loop = false;
+        path_condition = const_true();
+    }
+
+private:
+    bool remove_Lets;      // Remove Lets
+    bool remove_LetStmts;  // Remove LetStmts
+    bool funcs_only;       // Remove Lets/LetStmts in the given funcs below.
+    bool serial_loop_only; // Do removal only inside a serial loop.
+    const set<string> funcs;
+
+    bool in_replacable_func; // Inside the produce of a given func
+    bool in_serial_loop;     // Currently inside a serial loop.
+    Expr path_condition;     // Path condition to the current IR node.
+
+    Scope<Expr> scope;       // Record Let/LetStmts' variables' values
+
+    // Special case: Let/LetStmt x=select(cond, true_value, Undefined)
+    // In this case, x is defined only when cond is true. This could happen due to isolation, or
+    // CSE across statements. We need check that in the body, under the path condition of any
+    // occurrence of x, cond must be true, and thus we can replace x with the true_value. For this
+    // purpose, define the following scope to record cond. This scope must be pushed/popped
+    // simultaneously with the above "scope".
+    Scope<Expr> conditions;
+
+private:
+    class FindCallsNotToSubstitute : public IRVisitor {
+    public:
+        using IRVisitor::visit;
+        void visit(const Call* op) override {
+            if ((op->name == Call::get_intrinsic_name(Call::read_channel)) ||
+                 op->name == Call::get_intrinsic_name(Call::read_channel_nb)) {
+                result = true;
+                return;
+            }
+            IRVisitor::visit(op);
+        }
+        bool result = false;
+    };
+
+    // Internal helper functions
+    void update_path_condition(const Expr &new_condition) {
+        if (equal(path_condition, const_true())) {
+            path_condition = new_condition;
         } else {
-            return op;
+            path_condition = path_condition && new_condition;
         }
     }
 
-    Expr visit(const Let *op) override {
-        Expr new_value = mutate(op->value);
+    // If the current path condition is true, cond must be true.
+    bool condition_holds(const Expr &cond) {
+        if (equal(cond, const_true())) {
+            return true;
+        }
+        if (equal(cond, path_condition)) {
+            return true;
+        }
+        // Check if path_condition == cond && any other constraint
+        // Since cond is part of path_condition, if the latter is true, cond must be true
+        /* map<string, Expr> result;
+           Expr x = Variable::make(Bool(), "*");
+           if (expr_match(cond && x, path_condition, result)) {
+              return true;
+         } */
+        // Break the condition and path condition into conjunction terms. Test the former
+        // is part of the latter.
+        vector<Expr> cond_terms = break_logic_into_conjunction(cond);
+        vector<Expr> path_cond_terms = break_logic_into_conjunction(path_condition);
+        for (auto c : cond_terms) {
+            bool matched = false;
+            for (auto p : path_cond_terms) {
+                auto broadcast_p = p.as<Broadcast>();
+                Expr p_val = broadcast_p ?broadcast_p->value :p;
+                if (equal(c, const_true()) || equal(c, p_val)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void visit_Select_or_IfThenElse(bool is_select, const Select *select, const IfThenElse *if_then_else, Expr &new_select, Stmt &new_if_then_else) {
+        Expr new_true_value, new_false_value;
+        Stmt new_then_case, new_else_case;
+        Expr prev_path_condition = path_condition;
+
+        if (is_select) {
+            update_path_condition(select->condition);
+            new_true_value = mutate(select->true_value);
+        } else {
+            update_path_condition(if_then_else->condition);
+            new_then_case = mutate(if_then_else->then_case);
+        }
+        path_condition = prev_path_condition;
+
+        if (is_select && select->false_value.defined()) {
+            update_path_condition(!select->condition);
+            new_false_value = mutate(select->false_value);
+        } else if (!is_select && if_then_else->else_case.defined()) {
+            update_path_condition(!if_then_else->condition);
+            new_else_case = mutate(if_then_else->else_case);
+        }
+        path_condition = prev_path_condition;
+
+        if (is_select) {
+            new_select = Select::make(mutate(select->condition), new_true_value, new_false_value);
+        } else {
+            new_if_then_else = IfThenElse::make(mutate(if_then_else->condition), new_then_case, new_else_case);
+        }
+    }
+
+    void visit_Let_or_LetStmt(bool is_let, const Let *let, const LetStmt *letstmt,  Expr &new_let, Stmt &new_letstmt) {
+        bool do_removal = true;
+        if ((funcs_only && !in_replacable_func) || (serial_loop_only && !in_serial_loop)) {
+            do_removal = false;
+        } else if (is_let && !remove_Lets) {
+            do_removal = false;
+        } else if (!is_let && !remove_LetStmts) {
+            do_removal = false;
+        }
+
+        if (do_removal) {
+            FindCallsNotToSubstitute finder;
+            if (is_let) {
+                let->value.accept(&finder);
+            } else {
+                letstmt->value.accept(&finder);
+            }
+            if (finder.result) {
+                do_removal = false;
+            }
+        }
+
+        if (!do_removal) {
+            // Continue mutation without pushing the variable into the scope, so it won't be replaced in the body
+            if (is_let) {
+                new_let = IRGraphMutator::visit(let);
+            } else {
+                new_letstmt = IRGraphMutator::visit(letstmt);
+            }
+            return;
+        }
+
+        const std::string &name = is_let ? let->name : letstmt->name;
+        const Expr &value = is_let ? let->value : letstmt->value;
+
+        // Special handling: Let/LetStmt x=select(cond, true_value, Undefined)
+        Expr new_value;
+        Expr new_value_condition;
+        const Select *select = value.as<Select>();
+        if (select != NULL && !select->false_value.defined()) {
+            Expr old_condition = path_condition;
+            update_path_condition(select->condition);
+            new_value_condition = path_condition;
+            new_value = mutate(select->true_value);
+            path_condition = old_condition;
+        } else {
+            new_value_condition = path_condition;
+            new_value = mutate(value);
+        }
+
         // When we enter a let, we invalidate all cached mutations
         // with values that reference this var due to shadowing. When
         // we leave a let, we similarly invalidate any cached
@@ -207,13 +377,82 @@ class RemoveLets : public IRGraphMutator {
 
         // A blunt way to handle this is to temporarily invalidate
         // *all* mutations, so we never see the same Expr node
-        // on the inside and outside of a Let.
+        // on the inside and outside of a Let
         decltype(expr_replacements) tmp;
         tmp.swap(expr_replacements);
-        ScopedBinding<Expr> bind(scope, op->name, new_value);
-        auto result = mutate(op->body);
+        ScopedBinding<Expr> bind(scope, name, new_value);
+        ScopedBinding<Expr> bind1(conditions, name, new_value_condition);
+        if (is_let) {
+            new_let = mutate(let->body);
+        } else {
+            new_letstmt = mutate(letstmt->body);
+        }
         tmp.swap(expr_replacements);
-        return result;
+    }
+
+private:
+    Expr visit(const Variable *op) override {
+        if (scope.contains(op->name)) {
+            Expr value = scope.get(op->name);
+            Expr condition = conditions.get(op->name);
+            // debug(4) << " Var: " << op->name << "\n"
+            //         << "   condition: " << condition << "\n"
+            //         << "   path condition: " << path_condition << "\n";
+            internal_assert(condition_holds(condition));
+            return value;
+        }
+        return op;
+    }
+
+    Expr visit(const Select *op) override {
+        Expr new_select;
+        Stmt new_if_then_else; // useless
+        visit_Select_or_IfThenElse(true, op, NULL, new_select, new_if_then_else);
+        return new_select;
+    }
+
+    Stmt visit(const IfThenElse *op) override {
+        Expr new_select; // useless
+        Stmt new_if_then_else;
+        visit_Select_or_IfThenElse(false, NULL, op, new_select, new_if_then_else);
+        return new_if_then_else;
+    }
+
+    Expr visit(const Let *op) override {
+        Expr new_let;
+        Stmt new_letstmt; // useless
+        visit_Let_or_LetStmt(true, op, NULL, new_let, new_letstmt);
+        return new_let;
+    }
+
+    Stmt visit(const LetStmt *op) override {
+        Expr new_let;     // useless
+        Stmt new_letstmt;
+        visit_Let_or_LetStmt(false, NULL, op, new_let, new_letstmt);
+        return new_letstmt;
+    }
+
+    Stmt visit(const ProducerConsumer* op) override{
+        if(op->is_producer){
+            if(!funcs_only || funcs.find(op->name) != funcs.end()){
+                bool old_in_replacable_func = in_replacable_func;
+                in_replacable_func = true;
+                Stmt s = IRGraphMutator::visit(op);
+                in_replacable_func = old_in_replacable_func;
+                return s;
+            }
+        }
+        return IRGraphMutator::visit(op);
+    }
+
+    Stmt visit(const For* op) override{
+        bool old_in_serial_loop = in_serial_loop;
+        if (op->for_type == ForType::Serial) {
+            in_serial_loop = true;
+        }
+        Stmt s = IRGraphMutator::visit(op);
+        in_serial_loop = old_in_serial_loop;
+        return s;
     }
 };
 
@@ -352,6 +591,15 @@ Expr common_subexpression_elimination(const Expr &e_in, bool lift_all) {
 
 Stmt common_subexpression_elimination(const Stmt &s, bool lift_all) {
     return CSEEveryExprInStmt(lift_all).mutate(s);
+}
+
+Stmt remove_lets(const Stmt &s, bool remove_Lets, bool remove_LetStmts, bool funcs_only,
+                 bool serial_loop_only, const set<string> &funcs) {
+    return RemoveLets(remove_Lets, remove_LetStmts, funcs_only, serial_loop_only, funcs).mutate(s);
+}
+
+Expr remove_lets(const Expr &e) {
+    return RemoveLets(true, false, false, false, {}).mutate(e);
 }
 
 // Testing code.

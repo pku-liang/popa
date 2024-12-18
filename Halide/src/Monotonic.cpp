@@ -300,6 +300,10 @@ class DerivativeBounds : public IRVisitor {
 
             op->true_value.accept(this);
             ConstantInterval ra = result;
+            if (!op->false_value.defined()) {
+                result = ra;
+                return;
+            }
             op->false_value.accept(this);
             result.include(ra);
 

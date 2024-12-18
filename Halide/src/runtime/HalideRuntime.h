@@ -480,6 +480,7 @@ typedef enum halide_type_code_t
     halide_type_float = 2,   ///< IEEE floating point numbers
     halide_type_handle = 3,  ///< opaque pointer type (void *)
     halide_type_bfloat = 4,  ///< floating point numbers in the bfloat format
+    halide_type_complex = 5,
 } halide_type_code_t;
 
 // Note that while __attribute__ can go before or after the declaration,
@@ -1450,6 +1451,11 @@ typedef enum halide_target_feature_t {
     halide_target_feature_semihosting,            ///< Used together with Target::NoOS for the baremetal target built with semihosting library and run with semihosting mode where minimum I/O communication with a host PC is available.
     halide_target_feature_avx10_1,                ///< Intel AVX10 version 1 support. vector_bits is used to indicate width.
     halide_target_feature_x86_apx,                ///< Intel x86 APX support. Covers initial set of features released as APX: egpr,push2pop2,ppx,ndd .
+    halide_target_feature_intel_fpga, ///< Enable Intel FPGAs
+    halide_target_feature_one_api, ///< Enable Intel OneAPI dpcpp program generation
+    halide_target_feature_intel_gpu, ///< Enable Intel Graphics
+    halide_target_feature_enable_synthesis, ///< Enable synthesizing binaries. Currently used only for Intel FPGAs.
+    halide_target_feature_cm, ///< Enable C for metal
     halide_target_feature_end                     ///< A sentinel. Every target is considered to have this feature, and setting this feature does nothing.
 } halide_target_feature_t;
 
@@ -1527,7 +1533,11 @@ typedef struct halide_dimension_t {
 #endif
 
 typedef enum { halide_buffer_flag_host_dirty = 1,
-               halide_buffer_flag_device_dirty = 2 } halide_buffer_flags;
+               halide_buffer_flag_device_dirty = 2,
+               halide_buffer_flag_channel_1 = 4,
+               halide_buffer_flag_channel_2 = 8,
+               halide_buffer_flag_channel_3 = 16,
+               halide_buffer_flag_channel_4 = 32 } halide_buffer_flags;
 
 /**
  * The raw representation of an image passed around by generated

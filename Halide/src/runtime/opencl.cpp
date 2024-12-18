@@ -84,11 +84,34 @@ extern WEAK halide_device_interface_t opencl_image_device_interface;
 
 WEAK const char *get_opencl_error_name(cl_int err);
 WEAK int create_opencl_context(void *user_context, cl_context *ctx, cl_command_queue *q);
+cl_int create_opencl_command_queue(void *user_context, cl_context *ctx, cl_command_queue *q);
 
 // An OpenCL context/queue/synchronization lock defined in
 // this module with weak linkage
 cl_context WEAK context = nullptr;
+
+#ifdef OCL_MULTI_CMD_Q
+// For Intel FPGA OpenCL, we have to use single-issue multiple command queues
+// to simulate an out-of-order command queue, which is not yet supported.
+#define MAX_COMMAND_QUEUES  20
+// Command queues for executing kernels. Our IR for an FPGA kernel is like this:
+//      copy buffer to device // Need a command queue
+//      kernel                // Need a command queue
+// We must make sure that the kernel does not start until the copy-to-device before it is done.
+// To ensure that, we should put them into the same command queue.
+// Also, a kernel might communicate with another kernel in channels. So we need
+// to issue the two kernels into two different command queues.
+// Here is our policy: every kernel, and the copy-to-device actions before it, are assigned to an individual
+// command queue. Before copy the buffer to host, the IR should ensure to wait until all kernels complete.
+cl_command_queue WEAK command_queues[MAX_COMMAND_QUEUES] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+bool WEAK wait_for_finish[MAX_COMMAND_QUEUES] = {false, false, false, false, false, false, false, false, false, false,
+                                                 false, false, false, false, false, false, false, false, false, false};
+// The current command queue that can be used to execute a command (e.g. copy-to-device or run a kernel).
+cl_uint current_command_queue = 0;
+#else
 cl_command_queue WEAK command_queue = nullptr;
+#endif
+
 volatile ScopedSpinLock::AtomicFlag WEAK thread_lock = 0;
 
 WEAK char platform_name[256];
@@ -120,7 +143,7 @@ halide_error_code_t error_opencl(void *user_context, cl_int cl_error, const Args
 using namespace Halide::Runtime::Internal::OpenCL;
 
 // Allow OpenCL 1.1 features to be used.
-#define ENABLE_OPENCL_11
+//#define ENABLE_OPENCL_11  //Altera OpenCL is 1.0
 
 namespace {
 void halide_opencl_set_platform_name_internal(const char *n) {
@@ -136,7 +159,7 @@ void halide_opencl_set_platform_name_internal(const char *n) {
 
 const char *halide_opencl_get_platform_name_internal(void *user_context) {
     if (!platform_name_initialized) {
-        const char *name = getenv("HL_OCL_PLATFORM_NAME");
+        const char *name = getenv("INTEL_FPGA_OCL_PLATFORM_NAME");
         halide_opencl_set_platform_name_internal(name);
     }
     return platform_name;
@@ -223,6 +246,8 @@ WEAK const char *halide_opencl_get_build_options(void *user_context) {
 //   halide_release_cl_context. halide_acquire_cl_context should block while a
 //   previous call (if any) has not yet been released via halide_release_cl_context.
 WEAK int halide_acquire_cl_context(void *user_context, cl_context *ctx, cl_command_queue *q, bool create = true) {
+    debug(user_context) << "halide_acquire_cl_context " << "\n";
+
     // TODO: Should we use a more "assertive" assert? These asserts do
     // not block execution on failure.
     halide_abort_if_false(user_context, ctx != nullptr);
@@ -234,9 +259,31 @@ WEAK int halide_acquire_cl_context(void *user_context, cl_context *ctx, cl_comma
 
     // If the context has not been initialized, initialize it now.
     halide_abort_if_false(user_context, &context != nullptr);
-    halide_abort_if_false(user_context, &command_queue != nullptr);
+    // halide_abort_if_false(user_context, &command_queue != nullptr);
+
+    cl_command_queue *queue_ptr;
+#ifdef OCL_MULTI_CMD_Q
+    halide_abort_if_false(user_context, current_command_queue < MAX_COMMAND_QUEUES);
+    // If there is no OpenCL context, then we have not created any command queue yet.
+    halide_abort_if_false(user_context, context || current_command_queue == 0);
+    // If the context has been created, but current command queue is not created yet, do it.
+    if (context && command_queues[current_command_queue] == nullptr) {
+        cl_int error = create_opencl_command_queue(user_context, &context, &command_queues[current_command_queue]);
+        if (error != CL_SUCCESS) {
+            __sync_lock_release(&thread_lock);
+            return error;
+        }
+        *ctx = context;
+        *q = command_queues[current_command_queue];
+        return 0;
+    }
+    queue_ptr = &command_queues[current_command_queue];
+#else
+    queue_ptr = &command_queue;
+#endif
+
     if (!context && create) {
-        cl_int error = create_opencl_context(user_context, &context, &command_queue);
+        cl_int error = create_opencl_context(user_context, &context, queue_ptr);
         if (error != CL_SUCCESS) {
             __atomic_clear(&thread_lock, __ATOMIC_RELEASE);
             return error_opencl(user_context, error);
@@ -244,7 +291,7 @@ WEAK int halide_acquire_cl_context(void *user_context, cl_context *ctx, cl_comma
     }
 
     *ctx = context;
-    *q = command_queue;
+    *q = *queue_ptr;
     return halide_error_code_success;
 }
 
@@ -289,7 +336,7 @@ public:
 
         // don't abort: that would prevent host_supports_device_api() from being able work properly.
         if (!context || !cmd_queue) {
-            ::Halide::Runtime::Internal::error(user_context) << "OpenCL: null context or cmd_queue";
+            ::Halide::Runtime::Internal::error(user_context) << "OpenCL: nullptr context or cmd_queue";
             status = halide_error_code_generic_error;
         }
     }
@@ -354,6 +401,41 @@ WEAK int validate_device_pointer(void *user_context, halide_buffer_t *buf, size_
         return halide_error_code_generic_error;
     }
     return halide_error_code_success;
+}
+
+bool platform_is_intel_fpga_opencl() {
+    const char *intel_fpga_platform_name = getenv("INTEL_FPGA_OCL_PLATFORM_NAME");
+    if (intel_fpga_platform_name != nullptr) {
+        if (!strcmp(platform_name, intel_fpga_platform_name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+cl_int create_opencl_command_queue(void *user_context, cl_context *ctx, cl_command_queue *q) {
+    cl_int err = 0;
+    cl_device_id dev;
+
+    err = clGetContextInfo(*ctx, CL_CONTEXT_DEVICES, sizeof(dev), &dev, nullptr);
+    if (err != CL_SUCCESS) {
+        error(user_context) << "CL: clGetContextInfo(CL_CONTEXT_DEVICES) failed: "
+                            << get_opencl_error_name(err);
+        return err;
+    }
+
+    // debug(user_context) << "    clCreateCommandQueue ";
+    // *q = clCreateCommandQueue(*ctx, dev, nullptr, &err);
+
+    // if (err != CL_SUCCESS) {
+    //     debug(user_context) << get_opencl_error_name(err);
+    //     error(user_context) << "CL: clCreateCommandQueue failed: "
+    //                         << get_opencl_error_name(err);
+    // } else {
+    //     debug(user_context) << *q << "\n";
+    // }
+    err = create_opencl_command_queue(user_context, ctx, q);
+    return err;
 }
 
 // Initializes the context used by the default implementation
@@ -566,6 +648,99 @@ WEAK int create_opencl_context(void *user_context, cl_context *ctx, cl_command_q
     return halide_error_code_success;
 }
 
+extern "C" void    *fopen(const char *, const char *);
+extern "C" int      fclose(void *);
+extern "C" int      fseek(void *stream, long int offset, int origin);
+extern "C" long int ftell(void *stream);
+extern "C" void     rewind(void *stream);
+extern "C" size_t   fread(void *ptr, size_t size, size_t count, void *stream);
+extern "C" void     rewind(void *stream);
+extern "C" int 		fprintf(void *stream, const char *format, ...);
+extern "C" char    *strcpy ( char * destination, const char * source );
+extern "C" size_t   strlen(const char *str);
+#define SEEK_END 2 // TOFIX: this should be replaced with an include of a file.
+
+void AOCL_CreateProgramWithSource(void               *user_context,
+                                  cl_context          opencl_context,
+                                  const cl_device_id *devices,
+                                  cl_uint             count,
+                                  const char        **source,
+                                  cl_int             *p_err,
+                                  cl_program         &program) {
+    // We assume that for FPGA, a bitstream must have already been generated.
+    // And the file name is passed by into the runtime by the BITSTREAM environment variable.
+    char* bitstream = getenv("BITSTREAM");
+    char* home = getenv("HOME");
+    halide_abort_if_false(user_context, home != nullptr);
+    char aocx_name[300];
+    if (bitstream != nullptr) {
+        if (strlen(bitstream) > 300) {
+            error(user_context) << "The environment variable BITSTREAM is too long. Expect it within 300 characters.\n";
+            return;
+        }
+        strcpy(aocx_name, bitstream);
+    } else {
+        int len = strlen(home);
+        if (len > 290) {
+            error(user_context) << "The full name of the default bitstream file $HOME/tmp/a.aocx is too long."
+                <<" Consider to define a environment variable BITSTREAM within 300 characters instead. Current file name:\n"
+                << home << "/tmp/a.aocx\n";
+            return;
+        }
+        strcpy(aocx_name, home);
+        strcpy(aocx_name + len, "/tmp/a.aocx");
+    }
+
+    void *aocx_file = fopen(aocx_name, "rb");
+    if (aocx_file == nullptr) {
+        error(user_context) << "Bitstream file " << aocx_name << " failed to open.\n";
+        return;
+    }
+    fseek(aocx_file, 0, SEEK_END);
+
+    size_t lengths[1];
+    lengths[0] = ftell(aocx_file);
+
+    unsigned char *binary_content = (unsigned char *)halide_malloc(user_context, sizeof(unsigned char) * lengths[0]);
+    rewind(aocx_file);
+    fread(binary_content, lengths[0], 1, aocx_file);
+    fclose(aocx_file);
+
+    const unsigned char *binaries[1] = {binary_content};
+
+    // It seems that we have to load AOCL libraries. Otherwise, it cannot find
+    // the clCreateProgramWithBinary of AOCL. Statically linking with the AOCL
+    // libraries does not solve the problem, for whatever reason.
+    char* aocl_so = getenv("AOCL_SO");
+    if (aocl_so == nullptr) {
+        error(user_context) << "Environment variable AOCL_SO not set.\n";
+        return;
+    }
+    char* aocl_board_so = getenv("AOCL_BOARD_SO");
+    if (aocl_board_so == nullptr) {
+        error(user_context) << "Environment variable AOCL_BOARD_SO not set.\n";
+        return;
+    }
+
+    lib_opencl = halide_load_library(aocl_so);
+    debug(user_context) << (lib_opencl ? "\tSuccessfully loaded " : "\tFailed in loading ")
+                        <<  "Altera OpenCL runtime library " << aocl_so << "\n";
+    halide_abort_if_false(user_context, lib_opencl);
+
+    void *lib_board = halide_load_library(aocl_board_so);
+    debug(user_context) << (lib_board ? "\tSuccessfully loaded " : "\tFailed in loading ")
+                        <<  "Altera OpenCL board library " << aocl_board_so << "\n";
+    halide_abort_if_false(user_context, lib_board);
+
+    cl_int status[1];
+    program = clCreateProgramWithBinary(opencl_context, 1, devices, lengths,
+                                        (const unsigned char **)binaries,
+                                        status, p_err);
+    debug(user_context) << status[0] << "\n";
+    halide_abort_if_false(user_context, status[0] == CL_SUCCESS);
+}
+
+
 WEAK cl_program compile_kernel(void *user_context, cl_context ctx, const char *src, int size) {
     cl_int err = 0;
     cl_device_id dev;
@@ -606,14 +781,28 @@ WEAK cl_program compile_kernel(void *user_context, cl_context ctx, const char *s
 
     const char *sources[] = {src};
     debug(user_context) << "    clCreateProgramWithSource -> ";
-    cl_program program = clCreateProgramWithSource(ctx, 1, &sources[0], nullptr, &err);
-    if (err != CL_SUCCESS) {
-        debug(user_context) << get_opencl_error_name(err) << "\n";
-        error(user_context) << "CL: clCreateProgramWithSource failed: "
-                            << get_opencl_error_name(err);
-        return nullptr;
+    cl_program program = nullptr;
+    if (platform_is_intel_fpga_opencl()) {
+        debug(user_context) << "AOCL_CreateProgramWithSource -> ";
+        AOCL_CreateProgramWithSource(user_context, ctx, devices, 1, &sources[0], &err, program);
+        if (err != CL_SUCCESS) {
+            debug(user_context) << get_opencl_error_name(err) << "\n";
+            error(user_context) << "CL: AOCL_CreateProgramWithSource failed: "
+                                << get_opencl_error_name(err);
+            return nullptr;
+        } else {
+            debug(user_context) << (void *)program << "\n";
+        }
     } else {
-        debug(user_context) << (void *)program << "\n";
+        program = clCreateProgramWithSource(ctx, 1, &sources[0], nullptr, &err);
+        if (err != CL_SUCCESS) {
+            debug(user_context) << get_opencl_error_name(err) << "\n";
+            error(user_context) << "CL: clCreateProgramWithSource failed: "
+                                << get_opencl_error_name(err);
+            return nullptr;
+        } else {
+            debug(user_context) << (void *)program << "\n";
+        }
     }
 
     debug(user_context) << "    clBuildProgram " << (void *)program
@@ -660,6 +849,49 @@ WEAK cl_program compile_kernel(void *user_context, cl_context ctx, const char *s
 }  // namespace Halide
 
 extern "C" {
+int64_t exec_times[MAX_COMMAND_QUEUES][3]={{0,0,0}};
+const char *entry_names[MAX_COMMAND_QUEUES]={nullptr};
+
+WEAK int halide_opencl_wait_for_kernels_finish(void *user_context) {
+    // When we use multiple command queues, we flushed kernels, and did not wait for
+    // them to finish. Here we wait for all of them to finish.
+#ifdef OCL_MULTI_CMD_Q
+     int64_t k_earliest_start_time;
+     int64_t k_latest_end_time;
+     for ( cl_int i = current_command_queue; i >= 0; i-- ) {
+        if (command_queues[i] != nullptr) {
+            // TOFIX: overlay does not work well with WAIT_FINISH
+            if (1) { // wait_for_finish[i]) {
+                clFinish(command_queues[i]);
+                debug(user_context) << "    Kernel in command queue " << i << " finished at time " << halide_current_time_ns(user_context) << "\n";
+            
+                
+                exec_times[i][1]=halide_current_time_ns(user_context);
+                exec_times[i][2]=exec_times[i][1]-exec_times[i][0];
+
+                if (i == (cl_int) current_command_queue) {
+                    k_earliest_start_time = exec_times[i][0];
+                    k_latest_end_time = exec_times[i][1];
+                } else {
+                    if (exec_times[i][0] < k_earliest_start_time) {
+                        k_earliest_start_time = exec_times[i][0];
+                    }
+                    if (exec_times[i][1] > k_latest_end_time) {
+                        k_latest_end_time = exec_times[i][1];
+                    }
+                }
+            }
+        }
+    }
+    int64_t k_overall_exec_time = k_latest_end_time - k_earliest_start_time;
+
+    void *fp = fopen("exec_time.txt", "w");
+    fprintf(fp,"%f\n", (double)k_overall_exec_time);
+    fclose(fp);
+    debug(user_context) << "CLFinish: All command queues finished\n";
+#endif
+    return 0;
+}
 
 WEAK int halide_opencl_device_free(void *user_context, halide_buffer_t *buf) {
     // halide_opencl_device_free, at present, can be exposed to clients and they
@@ -798,7 +1030,6 @@ WEAK void halide_opencl_finalize_kernels(void *user_context, void *state_ptr) {
 // Used to generate correct timings when tracing
 WEAK int halide_opencl_device_sync(void *user_context, halide_buffer_t *) {
     debug(user_context) << "CL: halide_opencl_device_sync (user_context: " << user_context << ")\n";
-
     ClContext ctx(user_context);
     if (ctx.error()) {
         return ctx.error();
@@ -836,22 +1067,52 @@ WEAK int halide_opencl_device_release(void *user_context) {
     }
 
     if (ctx) {
+#ifdef OCL_MULTI_CMD_Q
+        for (cl_uint i = 0; i <= current_command_queue; i++) {
+            // Before the current one, all the command queues must have been created.
+            // The current one may, or may not yet, be created.
+            halide_abort_if_false(user_context, i == current_command_queue || command_queues[i] != nullptr);
+            if (command_queues[i] != nullptr) {
+                // TOFIX: overlay does not work well with WAIT_FINISH
+                if (1) { // wait_for_finish[i]) {
+                    err = clFinish(command_queues[i]);
+                    halide_abort_if_false(user_context, err == CL_SUCCESS);
+                }
+            }
+        }
+#else
         err = clFinish(q);
         if (err != CL_SUCCESS) {
             return error_opencl(user_context, err, "clFinish failed");
         }
+#endif
 
         compilation_cache.delete_context(user_context, ctx, clReleaseProgram);
 
         // Release the context itself, if we created it.
         if (ctx == context) {
+#ifdef OCL_MULTI_CMD_Q
+            for (cl_uint i = 0; i <= current_command_queue; i++) {
+                // Before the current one, all the command queues must have been created.
+                // The current one may, or may not yet, be created.
+                halide_abort_if_false(user_context, i == current_command_queue || command_queues[i] != nullptr);
+                if (command_queues[i] != nullptr) {
+                    debug(user_context) << "    clReleaseCommandQueue " << command_queues << "[" << i << "]\n";
+                    err = clReleaseCommandQueue(command_queues[i]);
+                    halide_abort_if_false(user_context, err == CL_SUCCESS);
+                    command_queues[i] = nullptr;
+                    wait_for_finish[i] = false;
+                }
+            }
+            current_command_queue = 0;
+#else
             debug(user_context) << "    clReleaseCommandQueue " << command_queue << "\n";
             err = clReleaseCommandQueue(command_queue);
             if (err != CL_SUCCESS) {
                 return error_opencl(user_context, err, "clReleaseCommandQueue failed");
             }
             command_queue = nullptr;
-
+#endif
             debug(user_context) << "    clReleaseContext " << context << "\n";
             err = clReleaseContext(context);
             if (err != CL_SUCCESS) {
@@ -872,6 +1133,25 @@ WEAK int halide_opencl_device_malloc(void *user_context, halide_buffer_t *buf) {
     ClContext ctx(user_context);
     if (ctx.error()) {
         return ctx.error();
+    }
+
+    // Check size is within limit. Not calling buf->size_in_bytes() since when the size is over the range of size_t,
+    // that function would return 0 instead of the true size.
+    uint64_t lowest_index = 0;
+    uint64_t highest_index = 0;
+    for (int i = 0; i < buf->dimensions; i++) {
+        if (buf->dim[i].stride < 0) {
+            lowest_index += (uint64_t)(buf->dim[i].stride) * (buf->dim[i].extent - 1);
+        }
+        if (buf->dim[i].stride > 0) {
+            highest_index += (uint64_t)(buf->dim[i].stride) * (buf->dim[i].extent - 1);
+        }
+    }
+    uint64_t total_bytes = (highest_index + 1  - lowest_index) * buf->type.bytes();
+    if (total_bytes > (static_cast<uint64_t>(1) << 32) - 1) {
+        debug(user_context) << "CL: halide_opencl_device_malloc failed: "
+                << total_bytes << " bytes are requested to allocate on the device. The size exceeds 2^32 - 1.\n";
+        halide_abort_if_false(user_context, false);
     }
 
     size_t size = buf->size_in_bytes();
@@ -1017,7 +1297,7 @@ WEAK int halide_opencl_buffer_copy(void *user_context, struct halide_buffer_t *s
 
         debug(user_context)
             << "CL: halide_opencl_buffer_copy (user_context: " << user_context
-            << ", src: " << src << ", dst: " << dst << ")\n";
+            << ", src: " << src << ", dst: " << dst << ", command queue: " << ctx.cmd_queue << ")\n";
 
 #ifdef DEBUG_RUNTIME
         uint64_t t_before = halide_current_time_ns(user_context);
@@ -1135,6 +1415,61 @@ WEAK int halide_opencl_run(void *user_context,
         memset(sub_buffers, 0, sizeof(cl_mem) * sub_buffers_needed);
     }
 
+#if 0 // Get kernel info. For debugging purpose only
+    {
+        size_t size_of_name;
+        err = clGetKernelInfo(f, CL_KERNEL_FUNCTION_NAME, 0, nullptr, &size_of_name);
+        debug(user_context) << "    clGetKernelInfo: size of kernel name = " << (uint32_t) size_of_name << ". Err " << err << "\n";
+        halide_abort_if_false(user_context, size_of_name < 200);
+
+        char kernel_name[200];
+        kernel_name[0]= '\0';
+        err = clGetKernelInfo(f, CL_KERNEL_FUNCTION_NAME, size_of_name, kernel_name, nullptr);
+        debug(user_context) << "    clGetKernelInfo: kernel name = " << kernel_name << ". Err " << err << "\n";
+
+        /* clGetKernelInfo does not seem to work properly when tried with aoc 19.4 emulation.
+        size_t num_args;
+        err = clGetKernelInfo(f, CL_KERNEL_NUM_ARGS, 0, nullptr, &num_args);
+        debug(user_context) << "    clGetKernelInfo: number of args = " << (uint32_t) num_args << ". Err " << err << "\n";
+         */
+
+        union {
+            cl_kernel_arg_address_qualifier address;
+            cl_kernel_arg_access_qualifier access;
+            cl_kernel_arg_type_qualifier type;
+            char type_name[200];
+        } kernel_arg_info;
+        size_t param_value_size;
+
+        i = 0;
+        while (arg_sizes[i] != 0) {
+            err = clGetKernelArgInfo(f, i, CL_KERNEL_ARG_ADDRESS_QUALIFIER, sizeof(kernel_arg_info), &kernel_arg_info.address, &param_value_size);
+            debug(user_context) << "    clGetKernelArgInfo " << i << "    Address " << kernel_arg_info.address << " Err " << err << "\n";
+
+            err = clGetKernelArgInfo(f, i, CL_KERNEL_ARG_ACCESS_QUALIFIER, sizeof(kernel_arg_info), &kernel_arg_info.access, &param_value_size);
+            debug(user_context) << "    clGetKernelArgInfo " << i << "    Access " << kernel_arg_info.access << " Err " << err << "\n";
+
+            err = clGetKernelArgInfo(f, i, CL_KERNEL_ARG_TYPE_QUALIFIER, sizeof(kernel_arg_info), &kernel_arg_info.type, &param_value_size);
+            debug(user_context) << "    clGetKernelArgInfo " << i << "    Type " << kernel_arg_info.type << " Err " << err << "\n";
+
+            kernel_arg_info.type_name[0] = '\0';
+            err = clGetKernelArgInfo(f, i, CL_KERNEL_ARG_TYPE_NAME, sizeof(kernel_arg_info), &kernel_arg_info.type_name, &param_value_size);
+            debug(user_context) << "    clGetKernelArgInfo " << i << "    TypeName " << kernel_arg_info.type_name << " Err " << err << "\n";
+
+            i++;
+        }
+        //if (i != (int) num_args) {
+        //    debug(user_context) << "    Warning: passed in arg sizes (" << i << ") not equal to queried arg sizes (" << (uint32_t) num_args << ")!\n";
+        //}
+    }
+
+    i = 0;
+    while (arg_sizes[i] != 0) {
+        debug(user_context) << "    Kernel arg " << i << ", size = " << (int)arg_sizes[i] << ", value = " << (*((void **)args[i])) << ", is buffer: " << arg_is_buffer[i] << "\n";
+        i++;
+    }
+#endif
+
     i = 0;
     while (arg_sizes[i] != 0) {
         debug(user_context) << "    clSetKernelArg " << i
@@ -1147,6 +1482,8 @@ WEAK int halide_opencl_run(void *user_context,
         if (arg_is_buffer[i]) {
             halide_abort_if_false(user_context, arg_sizes[i] == sizeof(uint64_t));
             cl_mem mem = ((device_handle *)((halide_buffer_t *)this_arg)->device)->mem;
+
+            #ifdef HAVE_OPENCL_12
             uint64_t offset = ((device_handle *)((halide_buffer_t *)this_arg)->device)->offset;
 
             if (offset != 0) {
@@ -1156,6 +1493,7 @@ WEAK int halide_opencl_run(void *user_context,
                 mem = clCreateSubBuffer(mem, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &err);
                 sub_buffers[sub_buffers_saved++] = mem;
             }
+            #endif
             if (err == CL_SUCCESS) {
                 debug(user_context) << "Mapped dev handle is: " << (void *)mem << "\n";
                 err = clSetKernelArg(f, i, sizeof(mem), &mem);
@@ -1173,6 +1511,7 @@ WEAK int halide_opencl_run(void *user_context,
         }
         i++;
     }
+    /*
     // Set the shared mem buffer last
     // Always set at least 1 byte of shmem, to keep the launch happy
     debug(user_context)
@@ -1181,6 +1520,7 @@ WEAK int halide_opencl_run(void *user_context,
     if (err != CL_SUCCESS) {
         return error_opencl(user_context, err, "clSetKernelArg failed");
     }
+    */
 
     // Launch kernel
     debug(user_context)
@@ -1208,6 +1548,38 @@ WEAK int halide_opencl_run(void *user_context,
     debug(user_context) << "    Releasing kernel " << (void *)f << "\n";
     clReleaseKernel(f);
     debug(user_context) << "    clReleaseKernel finished" << (void *)f << "\n";
+
+#ifdef OCL_MULTI_CMD_Q
+    err = clFlush(ctx.cmd_queue);
+    if (err != CL_SUCCESS) {
+        error(user_context) << "CL: clFlush failed (" << err << ")\n";
+        return err;
+    }
+    debug(user_context) << "    Kernel in command queue " << current_command_queue << " flushed: " << entry_name << " at time " << halide_current_time_ns(user_context) << "\n";
+    exec_times[current_command_queue][0]=halide_current_time_ns(user_context);
+    entry_names[current_command_queue]=entry_name;
+
+    // Check if this kernel should be waited for its finish.
+    char wait_postfix[] = "_WAIT_FINISH";
+    const char *p_end = entry_name;
+    while (*p_end) { p_end++; }
+    if (p_end - entry_name > 12) {
+        bool wait = true;;
+        for (int i = 0; i < 12; i++ ) {
+            if (*(p_end - 12 + i) != wait_postfix[i]) {
+                wait = false;
+                break;
+            }
+        }
+        if (wait) {
+            wait_for_finish[current_command_queue] = true;
+        }
+    }
+
+    // The next kernel, and the copy-to-device commands before it but after this kernel, in the Halide IR,
+    // should go to the next command queue.
+    current_command_queue++;
+#endif
 
 #ifdef DEBUG_RUNTIME
     err = clFinish(ctx.cmd_queue);
@@ -1565,6 +1937,25 @@ WEAK int halide_opencl_image_device_malloc(void *user_context, halide_buffer_t *
     ClContext ctx(user_context);
     if (ctx.error()) {
         return ctx.error();
+    }
+
+    // Check size is within limit. Not calling buf->size_in_bytes() since when the size is over the range of size_t,
+    // that function would return 0 instead of the true size.
+    uint64_t lowest_index = 0;
+    uint64_t highest_index = 0;
+    for (int i = 0; i < buf->dimensions; i++) {
+        if (buf->dim[i].stride < 0) {
+            lowest_index += (uint64_t)(buf->dim[i].stride) * (buf->dim[i].extent - 1);
+        }
+        if (buf->dim[i].stride > 0) {
+            highest_index += (uint64_t)(buf->dim[i].stride) * (buf->dim[i].extent - 1);
+        }
+    }
+    uint64_t total_bytes = (highest_index + 1  - lowest_index) * buf->type.bytes();
+    if (total_bytes > (static_cast<uint64_t>(1) << 32) - 1) {
+        debug(user_context) << "CL: halide_opencl_device_malloc failed: "
+                << total_bytes << " bytes are requested to allocate on the device. The size exceeds 2^32 - 1.\n";
+        halide_abort_if_false(user_context, false);
     }
 
     size_t size = buf->size_in_bytes();

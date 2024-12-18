@@ -19,6 +19,7 @@
 #include "Realization.h"
 #include "Target.h"
 #include "Tuple.h"
+#include "Function.h"
 
 namespace Halide {
 
@@ -273,6 +274,17 @@ public:
                       const std::string &fn_name,
                       const Target &target = get_target_from_environment());
 
+    void compile_to_cm(const std::vector<Argument> &,
+                       const std::string &fn_name,
+                       const Target &target = get_target_from_environment());
+
+    /** Statically compile this function to DPCPP source code.
+     * This relies on the original OpenCL device code wrapped in DPCPP/SYCL calls/
+     * To compile this code, one will need to install Intel's OneAPI with DPCPP. */
+    void compile_to_oneapi(const std::vector<Argument> &,
+                           const std::string &fn_name,
+                           const Target &target = get_target_from_environment());
+
     /** Write out an internal representation of lowered code. Useful
      * for analyzing and debugging scheduling. Can emit html or plain
      * text. */
@@ -285,6 +297,11 @@ public:
      * Pipeline's Funcs. Helpful for understanding what a schedule is
      * doing. */
     void print_loop_nest();
+
+    void compile_to_host(const std::string &filename_prefix,
+                         const std::vector<Argument> &args,
+                         const std::string &fn_name,
+                         const Target &target = get_target_from_environment());
 
     /** Compile to object file and header pair, with the given
      * arguments. */
@@ -485,6 +502,9 @@ public:
 
     /** Generate begin_pipeline and end_pipeline tracing calls for this pipeline. */
     void trace_pipeline();
+
+    // Return a map from Func names to the Funcs within the pipeline.
+    std::map<std::string, Func> compute_environment() const;
 
 private:
     std::string generate_function_name() const;

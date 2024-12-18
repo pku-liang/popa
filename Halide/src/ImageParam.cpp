@@ -35,6 +35,7 @@ Func ImageParam::create_func() const {
     }
     Func f(param.type(), param.dimensions(), name() + "_im");
     f(args) = Internal::Call::make(param, args_expr);
+    f.function().definition().schedule().is_param_func() = true;
     return f;
 }
 
@@ -93,6 +94,11 @@ ImageParam &ImageParam::add_trace_tag(const std::string &trace_tag) {
     internal_assert(func.defined());
     func.add_trace_tag(trace_tag);
     return *this;
+}
+
+ImageParamOrExpr ImageParam::BCropped(int block_size, std::vector<Expr> start_end) {
+    ImageParamOrExpr im(*this, std::pair<int, std::vector<Expr>>(block_size, start_end));
+    return im;
 }
 
 }  // namespace Halide

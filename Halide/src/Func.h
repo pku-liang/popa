@@ -17,12 +17,20 @@
 #include "Tuple.h"
 #include "Var.h"
 
+// T2S related
+#include "../../t2s/src/CmdQueue.h"
+#include "../../t2s/src/Gather.h"
+#include "../../t2s/src/ScatterAndBuffer.h"
+
 #include <map>
 #include <utility>
 
 namespace Halide {
 
+class ImageParam;
 class OutputImageParam;
+class Overlay;
+enum class BufferStrategy;
 
 /** A class that can represent Vars or RVars. Used for reorder calls
  * which can accept a mix of either. */
@@ -57,7 +65,45 @@ struct VarOrRVar {
     bool is_rvar;
 };
 
-class ImageParam;
+/** A class that can represent Funcs (including ImageParam) or Exprs. Used for isolate_producer
+ *  and isolate_producer_chain calls, which can accept a mix of either. */
+struct FuncOrExpr {
+    FuncOrExpr(const Func &f)
+        : func(&f), is_expr(false), is_image(false) {
+    }
+    FuncOrExpr(const ImageParam &i)
+        : image(&i), is_expr(false), is_image(true) {
+    }
+    FuncOrExpr(const Expr &e)
+        : expr(e), is_expr(true), is_image(false) {
+    }
+
+    const Func       *func;  // Func class is undefined at this point, and thus use a pointer
+    const ImageParam *image; // ImageParam class is undefined at this point, and thus use a pointer
+    const Expr        expr;
+    bool  is_expr;
+    bool  is_image;
+};
+
+/** A class that can represent ImageParams or Exprs and store extra information(BCropped or crop).
+ *  Used for command() and enqueue() calls, which can accept a mix of either. */
+struct ImageParamOrExpr {
+    ImageParamOrExpr(const ImageParam &i)
+        : image(&i), is_image(true), is_cropped(false) {
+    }
+    ImageParamOrExpr(const ImageParam &i, std::pair<int, std::vector<Expr>> _cropped_info)
+        : image(&i), is_image(true), is_cropped(true), cropped_info(_cropped_info) {
+    }
+    ImageParamOrExpr(const Expr &e)
+        : expr(e), is_image(false), is_cropped(false) {
+    }
+
+    const ImageParam *image; // ImageParam class is undefined at this point, and thus use a pointer
+    const Expr        expr;
+    bool  is_image;
+    bool  is_cropped;
+    std::pair<int, std::vector<Expr>> cropped_info;
+};
 
 namespace Internal {
 class Function;
@@ -426,6 +472,8 @@ public:
     Stage &gpu_tile(const VarOrRVar &x, const VarOrRVar &bx, const VarOrRVar &tx, const Expr &x_size,
                     TailStrategy tail = TailStrategy::Auto,
                     DeviceAPI device_api = DeviceAPI::Default_GPU);
+    
+    
 
     Stage &gpu_tile(const VarOrRVar &x, const VarOrRVar &tx, const Expr &x_size,
                     TailStrategy tail = TailStrategy::Auto,
@@ -454,6 +502,8 @@ public:
                     const Expr &x_size, const Expr &y_size, const Expr &z_size,
                     TailStrategy tail = TailStrategy::Auto,
                     DeviceAPI device_api = DeviceAPI::Default_GPU);
+    
+    
 
     Stage &allow_race_conditions();
     Stage &atomic(bool override_associativity_test = false);
@@ -522,6 +572,10 @@ public:
      * for a Func with multiple outputs. */
     Stage operator=(const Tuple &);
 
+    /** Use this as the hook between func and overlay
+     * f(x, y) = enqueue(overlay, vars, conds) */
+    Stage operator=(Overlay &);
+
     /** Define a stage that adds the given expression to this Func. If the
      * expression refers to some RDom, this performs a sum reduction of the
      * expression over the domain. If the function does not already have a
@@ -587,6 +641,10 @@ public:
     /** What function is this calling? */
     Internal::Function function() const {
         return func;
+    }
+
+    std::vector<Expr> arguments() const {
+        return args;
     }
 };
 
@@ -715,18 +773,27 @@ class Func {
     /** The imaging pipeline that outputs this Func alone. */
     Pipeline pipeline_;
 
-    /** Get the imaging pipeline that outputs this Func alone,
-     * creating it (and freezing the Func) if necessary. */
-    Pipeline pipeline();
-
     // Helper function for recursive reordering support
     Func &reorder_storage(const std::vector<Var> &dims, size_t start);
 
     void invalidate_cache();
 
+    // friend class
+    friend class Overlay;
+
 public:
-    /** Declare a new undefined function with the given name */
-    explicit Func(const std::string &name);
+    /** Get the imaging pipeline that outputs this Func alone,
+     * creating it (and freezing the Func) if necessary. */
+    Pipeline pipeline();
+
+    /** After we transform (i.e. unroll, vectorize, remove, etc.) a loop, call this function
+     *  to apply the same transform to the same loop in all the merged UREs of this Func, because
+     *  the UREs and this Func will be merged later and have to share the same loop structure.
+     */
+    void apply_same_loop_transform_to_merged_ures();
+
+    /** Declare a new undefined function with the given name at the given place.*/
+    explicit Func(const std::string &name, Place place = Place::Host);
 
     /** Declare a new undefined function with the given name.
      * The function will be constrained to represent Exprs of required_type.
@@ -742,22 +809,37 @@ public:
     explicit Func(const std::vector<Type> &required_types, int required_dims, const std::string &name);
 
     /** Declare a new undefined function with an
-     * automatically-generated unique name */
-    Func();
+     * automatically-generated unique name at the given place. */
+    Func(Place place = Place::Host);
 
     /** Declare a new function with an automatically-generated unique
      * name, and define it to return the given expression (which may
      * not contain free variables). */
-    explicit Func(const Expr &e);
+    explicit Func(const Expr &e, Place place = Place::Host);
 
     /** Construct a new Func to wrap an existing, already-define
-     * Function object. */
+     * Function object, at the same place. */
+    explicit Func(Internal::Function f, Place place);
     explicit Func(Internal::Function f);
 
-    /** Construct a new Func to wrap a Buffer. */
+     /** Declare a new function with an automatically-generated unique
+      * name, and the given return type and arguments). */
+     explicit Func(Type return_type, const std::vector<Var> &args, Place place = Place::Host);
+ 
+     /** Declare a new function with an automatically-generated unique
+      * name, and the given return types and arguments on a place. */
+     explicit Func(const std::vector<Type> &return_types, const std::vector<Var> &args, Place place = Place::Host);
+ 
+     /** Declare a new function with the given name, return type and arguments on a place. */
+     explicit Func(const string &name, Type return_type, const std::vector<Var> &args, Place place = Place::Host);
+
+    /** Declare a new function with the given name, return types and arguments on a place. */
+    explicit Func(const string &name, const std::vector<Type> &return_types, const std::vector<Var> &args, Place place = Place::Host);
+
+    /** Construct a new Func to wrap a Buffer at the given place. */
     template<typename T, int Dims>
-    HALIDE_NO_USER_CODE_INLINE explicit Func(Buffer<T, Dims> &im)
-        : Func() {
+    HALIDE_NO_USER_CODE_INLINE explicit Func(Buffer<T, Dims> &im, Place place = Place::Host)
+        : Func(place) {
         (*this)(_) = im(_);
     }
 
@@ -946,6 +1028,20 @@ public:
                       const std::string &fn_name = "",
                       const Target &target = get_target_from_environment());
 
+    /** Generate CM device code for Intel GPU, with the given function
+    * name. Other parameters are set to default or omit. The kernel source code
+    * filename is the same as fn_name */
+    void compile_to_cm(const std::vector<Argument> &,
+                       const std::string &fn_name = "",
+                       const Target &target = get_target_from_environment());
+
+    /** Statically compile this function to DPCPP source code.
+     * This relies on the original OpenCL device code wrapped in DPCPP/SYCL calls/
+     * To compile this code, one will need to install Intel's OneAPI with DPCPP. */
+    void compile_to_oneapi(const std::vector<Argument> &,
+                           const std::string &fn_name = "",
+                           const Target &target = get_target_from_environment());
+
     /** Write out an internal representation of lowered code. Useful
      * for analyzing and debugging scheduling. Can emit html or plain
      * text. */
@@ -958,6 +1054,10 @@ public:
      * Function. Helpful for understanding what a schedule is
      * doing. */
     void print_loop_nest();
+
+    void compile_to_host(const std::string &filename_prefix, const std::vector<Argument> &args,
+                         const std::string &fn_name = "",
+                         const Target &target = get_target_from_environment());
 
     /** Compile to object file and header pair, with the given
      * arguments. The name defaults to the same name as this halide
@@ -1435,7 +1535,9 @@ public:
      * constant factor. For most uses of vectorize you want the two
      * argument form. The variable to be vectorized should be the
      * innermost one. */
-    Func &vectorize(const VarOrRVar &var);
+    Func &__vectorize(VarOrRVar var);
+
+    Func &vectorize(VarOrRVar var);
 
     /** Mark a dimension to be completely unrolled. The dimension
      * should have constant extent - e.g. because it is the inner
@@ -1443,11 +1545,26 @@ public:
      * of unroll you want the two-argument form. */
     Func &unroll(const VarOrRVar &var);
 
+    /** Mark a dimension to be removed. */
+    Func &remove(VarOrRVar var);
+
+    /** Mark variables to be removed */
+    Func &remove(const std::vector<VarOrRVar> &vars);
+
+    template<typename... Args>
+    HALIDE_NO_USER_CODE_INLINE typename std::enable_if<Internal::all_are_convertible<VarOrRVar, Args...>::value, Func &>::type
+    remove(VarOrRVar x, VarOrRVar y, Args &&... args) {
+        std::vector<VarOrRVar> collected_args{x, y, std::forward<Args>(args)...};
+        return remove(collected_args);
+    }
+
     /** Split a dimension by the given factor, then vectorize the
      * inner dimension. This is how you vectorize a loop of unknown
      * size. The variable to be vectorized should be the innermost
      * one. After this call, var refers to the outer dimension of the
      * split. 'factor' must be an integer. */
+    Func &__vectorize(const VarOrRVar &var, const Expr &factor, TailStrategy tail = TailStrategy::Auto);
+
     Func &vectorize(const VarOrRVar &var, const Expr &factor, TailStrategy tail = TailStrategy::Auto);
 
     /** Split a dimension by the given factor, then unroll the inner
@@ -2188,6 +2305,9 @@ public:
      */
     Func &compute_at(const Func &f, const Var &var);
 
+    Func &late_fuse(Func f, int v_outs = 1);
+    Func &late_fuse(Func f, Var var, int v_outs = 1);
+
     /** Schedule a function to be computed within the iteration over
      * some dimension of an update domain. Produces equivalent code
      * to the version of compute_at that takes a Var. */
@@ -2196,6 +2316,9 @@ public:
     /** Schedule a function to be computed within the iteration over
      * a given LoopLevel. */
     Func &compute_at(LoopLevel loop_level);
+
+    Func &gpu_fetch(Var loop_level, MemoryType mem_type, vector<Var> outs, vector<Expr> reuse_args);
+    Func &gpu_store(const vector<Expr> &args, const string &name, size_t sz = 16);
 
     /** Schedule the iteration over the initial definition of this function
      *  to be fused with another stage 's' from outermost loop to a
@@ -2600,6 +2723,365 @@ public:
     const Internal::StageSchedule &get_schedule() const {
         return Stage(*this).get_schedule();
     }
+
+    /** Insert the given Funcs' definitions, in order, before the definition
+     * of this Func. Each of this and all the given Funcs must have one and
+     * only one definition, and must be in the form of uniform recurrence
+     * equation.
+     * For example,
+     \code
+     Func F(Float(32, 1), {i, j}, Place::Device);
+     Func G(Float(32, 1), {i, j}, Place::Device);
+     Func H(Float(32, 1), {i, j}, Place::Device);
+     F(i, j) = select(j == 0, i, F(i, j - 1));
+     G(i, j) = select(i == 0, F(i, j), G(i - 1, j));
+     H(i, j) = select(i == 0 || j == 0, i + j, G(i - 1, j - 1));
+     F.merge_ures(G, H);
+     \endcode
+     * Here each Func is declared with the same arguments {i, j}, and in the
+     * definition, the LHS is in terms of {i, j}, while the RHS is in terms of
+     * {i - some natural number, j - some natural number}. The programmer needs
+     * write both the initial condition and recurrent relation.
+     * After merging, H's definition becomes
+     \code
+     for j
+       for i {
+         F(i, j) = select(j == 0, i, F(i, j - 1));
+         G(i, j) = select(i == 0, F(i, j), G(i - 1, j));
+         H(i, j) = select(i == 0 || j == 0, i + j, G(i - 1, j - 1));
+       }
+     }
+     \endcode
+     * That is, both G and H's definitions become part of F's definition.
+     */
+    Func &merge_ures(std::vector<Func> &ures, bool isolate=false);
+    Func &merge_ures(std::vector<Func> ures, std::vector<Func> output_ures, bool isolate=false);
+    Func &merge_ures(std::vector<VarOrRVar> loop_level, std::vector<Func> ures, std::vector<Func> output_ures, bool isolate=false);
+
+    template <typename... Args>
+    HALIDE_NO_USER_CODE_INLINE typename std::enable_if<Internal::all_are_convertible<Func, Args...>::value, Func &>::type
+    merge_ures(Func f, Args... args) {
+        std::vector<Func> collected_args{f, std::forward<Args>(args)...};
+        return merge_ures(collected_args);
+    }
+
+    /** Isolate the calls to a set of Funcs from this Func to a producer.
+     * The producer must not have been defined before and it will get defined
+     * as the consequence of the isolation.
+     * The call to every Func in the given set must be unique in this Func.
+     * When the call is isolated, the path condition to the call, as well as
+     * any other Func in the merged UREs of this Func that the call and the condition
+     * depend on, will be cloned and isolated out into Func p as well, so that Func p
+     * is self-contained.
+     * For example:
+     \code
+     Func e, f, g, h, p;
+     e(x, y) = x + y;
+     f(x, y) = x - y;
+     g(x, y) = (x == 0);
+     h(x, y) = select(g(x, y), x, e(x-1, y)) * f(x, y-1);
+     h.merge_ures(e, f, g).isolate_producer_chain({e, f}, p);
+     \endcode
+    * Results in:
+    \code
+    Func p:
+         // The definitions of the dependees, i.e. Func e, f and g, are cloned.
+         p_e_clone(x, y) = x + y;
+         p_f_clone(x, y) = x - y;
+         p_g_clone(x, y) = (x == 0);
+
+         // The two calls are isolated to created two values.
+         // Their references to their dependees are replaced by those to
+         // the clones. The last value uses the name of the producer.
+         p_e(x, y) = select(p_g_clone(x, y), UNDEFINED, p_e_clone(x-1, y));
+         p  (x, y) = p_f_clone(x, y-1);
+    Func h:
+         // The definitions of e and f are no longer used, and optimized away.
+         g(x, y) = (x == 0);
+         // The two values are used in this Func.
+         h(x, y) = select(g(x, y), x, p_e(x, y)) * p(x, y);
+    \endcode
+     */
+    Func &isolate_producer(const std::vector<FuncOrExpr> &fs, Func p);
+
+    /** Isolate the call to a Func from this Func to a producer. */
+    Func &isolate_producer(FuncOrExpr f, Func p) {
+        std::vector<FuncOrExpr> fs = {f};
+        return isolate_producer(fs, p);
+    }
+
+    /** Isolate the calls to a set of Funcs to a chain of producers.
+     *  For example,
+     \code
+     Func g, f, h, p1, p2, p3;
+     g(x, y) = f(x-1, y) * h(x-1, y-1) * 2;
+     g.isolate_producer_chain({f, h}, {p1, p2, p3});
+     \endcode
+     * will isolate the calls to {f, h}, i.e. f(x-1, y) and h(x-1, y-1),
+     * from this Func to p3, and then from p3 to p2, and finally from p2 to p1.
+     */
+    // @{
+    Func &isolate_producer_chain(const std::vector<FuncOrExpr> &fs, const std::vector<Func> &producers);
+
+    template<typename... Args>
+    HALIDE_NO_USER_CODE_INLINE typename std::enable_if<Internal::all_are_convertible<Func&, Args...>::value, Func&>::type
+    isolate_producer_chain(const std::vector<FuncOrExpr> &fs, Func &p, Args &&... args) {
+        std::vector<Func> collected_args{p, std::forward<Args>(args)...};
+        return isolate_producer_chain(fs, collected_args);
+    };
+    // @}
+
+    /** Isolate the call to Func f to a chain of producers. A special case of isolating a set of
+     * function calls to a chain of producers. */
+    // @{
+    template<typename... Args>
+    HALIDE_NO_USER_CODE_INLINE typename std::enable_if<Internal::all_are_convertible<Func&, Args...>::value, Func&>::type
+    isolate_producer_chain(FuncOrExpr f, Func &p, Args &&... args) {
+        std::vector<Func> collected_args{p, std::forward<Args>(args)...};
+        return isolate_producer_chain({f}, collected_args);
+    };
+    // @}
+
+    /** Isolate the output of this Func to a consumer Func.
+     * The consumer must not have been defined before and it will get defined
+     * as the consequence of the isolation.
+     * The usage is like
+     \code
+     Func f, c;
+     f(x, y) = whatever;
+     f.isolate_consumer(c);
+     \endcode
+    *. This will produce
+    \code
+    Func f:   f(x, y) = whatever;
+    Func c:   c(x, y) = f(x, y);
+    \endcode
+    * In a typical example, we use UREs and want only the final results after reduction:
+    \code
+    Func f, out, c;
+    f(x, y)= select(x == 0, x, f(x - 1, y));
+    out(y) = f(10, y);
+    out.merge_ures(f)
+       .isolate_consumer(c);
+    c.realize(20);
+    \endcode
+    *. This results in
+    \code
+    Func out: f(x, y)= select(x == 0, x, f(x - 1, y));
+              out(y) = select(x == 10, f(x, y));
+    Func c:   c(y)   = out(y);
+    \endcode
+    where x iterates through [0, 10)] and y [0, 20), in unit step.
+     */
+    Func &isolate_consumer(Func c);
+
+    /** Isolate the output of this Func to a chain of consumers.
+     *  For example,
+     \code
+     Func f, c1, c2, c3;
+     f(x, y) = ...;
+     f.isolate_consumer_chain(c1, c2, c3);
+     \endcode
+     * will produce
+     \code
+     Func f:  f(x, y)  = ...
+     Func c1: c1(x, y) = f(x, y);
+     Func c2: c2(x, y) = c1(x, y);
+     Func c3: c3(x, y) = c2(x, y);
+     \endcode
+     */
+    // @{
+    Func &isolate_consumer_chain(std::vector<Func> &consumers);
+
+    template<typename... Args>
+    HALIDE_NO_USER_CODE_INLINE typename std::enable_if<Internal::all_are_convertible<Func&, Args...>::value, Func&>::type
+    isolate_consumer_chain(Func &c, Args &&... args) {
+        std::vector<Func> collected_args{c, std::forward<Args>(args)...};
+        return isolate_consumer_chain(collected_args);
+    };
+    // @}
+
+    /** Flatten a loop and its inner loops. */
+    Func &flatten(VarOrRVar var) {
+        // TODO
+        return *this;
+    }
+
+    /** Insert buffer for func "f" at loop level "loop", with buffer strategy "strategy".
+     *  g(x,y) = f(x,y);
+     *  g.buffer(f, x, BufferStrategy::Double)
+    */
+    Func &buffer(Func f, VarOrRVar loop, BufferStrategy strategy = BufferStrategy::Double, BufferReadStrategy read_strategy = BufferReadStrategy::Block);
+    Func &addressable_buffer(Func f, VarOrRVar buffer_loop, vector<Expr> write_indices, vector<Expr> read_indices = {}, BufferStrategy strategy = BufferStrategy::Double);
+
+    /** Partition the operand "op" of this Func along the "loop" into "nums" (e.g., 4) parts,
+     * which are placed in separate DDR channels and sent into "consumer".
+    */
+    Func &partition(FuncOrExpr op, Func consumer, Var loop, int nums);
+
+    /**   the values of f along the given loop with the given strategy.
+     * For example,
+     \code
+     Func A, B;
+     Var i, j;
+     A(i, j) = i + j;
+     B(i, j) = A(i, j);
+     A.compute_root();
+     B.scatter(A, j);
+     \endcode
+     * In Func B, all the incoming values of Func A will be received by iteration 0 of loop j,
+     * which keeps the data belonging to itself, and passes the other data belonging
+     * to the other iterations to iteration 1, which keeps the data belonging to
+     * itself, and passes the other data belonging to the other iterations to
+     * iteration 2, and so on.
+     */
+
+    Func &scatter(Func f, VarOrRVar loop, ScatterStrategy strategy = ScatterStrategy::Up);
+
+    Func &scatter(std::vector<Func> funcs, VarOrRVar loop, ScatterStrategy strategy = ScatterStrategy::Up);
+
+    /** Gather the values of f along the given loop with the given strategy.
+     * For example,
+     \code
+     Func A, B;
+     Var i, j;
+     A(i, j) = i + j;
+     B(i, j) = A(i, j);
+     B.isolate_consumer_chain(c1);
+     c1.gather(B, j);
+     \endcode
+     * In Func c1, all the incoming values of Func B will be received by iteration 0 of loop j,
+     * which keeps the data belonging to itself, and passes the other data belonging
+     * to the other iterations to iteration 1, which keeps the data belonging to
+     * itself, and passes the other data belonging to the other iterations to
+     * iteration 2, and so on.
+     */
+
+    Func &gather(Func f, VarOrRVar loop, GatherStrategy strategy = GatherStrategy::Up);
+
+    Func &relay(Func f, VarOrRVar loop);
+
+    Func &command(int index, std::vector<Argument> inputs, std::vector<Argument> outputs, std::vector<Argument> inouts);
+
+    Func &depend(Func &f, std::vector<Expr> &vars);
+    Func &depend(Func &f, std::vector<Expr> &vars, std::vector<Expr> conds);
+    template<typename... Args>
+    HALIDE_NO_USER_CODE_INLINE typename std::enable_if<Internal::all_are_convertible<Expr, Args...>::value, Func &>::type
+    depend(Func &f, Args &&... args) {
+        std::vector<Expr> collected_args{std::forward<Args>(args)...};
+        std::vector<Expr> vars, conds;
+        bool condition_bound = false;
+        for (auto &e : collected_args) {
+            if (!condition_bound) {
+                if (e.as<Internal::Add>() || e.as<Internal::Sub>() || e.as<Internal::Variable>()) {
+                    vars.push_back(e);
+                } else {
+                    condition_bound = true;
+                    conds.push_back(e);
+                }
+            } else {
+                conds.push_back(e);
+            }
+        }
+        return depend(f, vars, conds);
+    }
+
+    /** For each of the given loop variabls, set the min and extent. */
+    // @{
+    Func &set_bounds(const std::vector<Var> &vars, const std::vector<Expr> &mins, const std::vector<Expr> &extents);
+
+    Func &set_bounds(Var x, Expr x_min, Expr x_extent) {
+      /* set_bounds({x}, {x_min}, {x_extent}) will directly call itself */
+        std::vector<Var> x_ = {x};
+        std::vector<Expr> x_min_ = {x_min};
+        std::vector<Expr> x_extent_ = {x_extent};
+        return set_bounds(x_, x_min_, x_extent_);
+    }
+    Func &set_bounds(Expr x_min, Expr x_extent) {
+        return set_bounds(Var::implicit(0), x_min, x_extent);
+    }
+    Func &set_bounds(Var x, Expr x_min, Expr x_extent,
+                     Var y, Expr y_min, Expr y_extent) {
+        return set_bounds({x, y}, {x_min, y_min}, {x_extent, y_extent});
+    }
+    Func &set_bounds(Expr x_min, Expr x_extent,
+                     Expr y_min, Expr y_extent) {
+        return set_bounds(Var::implicit(0), x_min, x_extent,
+                          Var::implicit(1), y_min, y_extent);
+    }
+    Func &set_bounds(Var x, Expr x_min, Expr x_extent,
+                     Var y, Expr y_min, Expr y_extent,
+                     Var z, Expr z_min, Expr z_extent) {
+        return set_bounds({x, y, z}, {x_min, y_min, z_min}, {x_extent, y_extent, z_extent});
+    }
+    Func &set_bounds(Expr x_min, Expr x_extent,
+                     Expr y_min, Expr y_extent,
+                     Expr z_min, Expr z_extent) {
+        return set_bounds(Var::implicit(0), x_min, x_extent,
+                          Var::implicit(1), y_min, y_extent,
+                          Var::implicit(2), z_min, z_extent);
+    }
+    Func &set_bounds(Var x, Expr x_min, Expr x_extent,
+                     Var y, Expr y_min, Expr y_extent,
+                     Var z, Expr z_min, Expr z_extent,
+                     Var w, Expr w_min, Expr w_extent) {
+        return set_bounds({x, y, z, w}, {x_min, y_min, z_min, w_min}, {x_extent, y_extent, z_extent, w_extent});
+    }
+    // @}
+
+    /** Triangular loop nest will merge into a a single loop annotated with ivdep pragma. */
+    // @{
+    Func &triangular_loop_optimize(Var outer_loop, Var inner_loop, int safelen);
+    // @}
+
+    /** With the given space loop variables, build a systolic array in the unscheduled approach.
+     *  In this approach, the compiler unrolls the space loops, and replaces recurrent function accesses
+     *  with FIFO accesses. This will create opportunities for software pipelining, which hopefully results
+     *  in a schedule like a systolic array (not guaranteed, though).
+     */
+    // @{
+    Func &space_time_transform(const vector<Var> &vars, SpaceTimeTransform check=SpaceTimeTransform::NoCheckTime);
+
+    template<typename... Args>
+    HALIDE_NO_USER_CODE_INLINE typename std::enable_if<Internal::all_are_convertible<Var, Args...>::value, Func &>::type
+    space_time_transform(Var v, Args &&... args) {
+        std::vector<Var> collected_args{v, std::forward<Args>(args)...};
+        return space_time_transform(collected_args);
+    };
+    // @}
+
+    /** With the given space loop variables, build a systolic array in the scheduled approach.
+     *  In this approach, the compiler unrolls the space loops, and replaces recurrent function accesses
+     *  with FIFO accesses. In addition, the compiler schedules the PEs (i.e. the unrolled space loops)
+     *  with a time schedule that is determined by the given coefficients. Inside each PE, all the loops
+     *  (without the space loops) run sequentially. Further, if SpaceTimeTransform::CheckTime
+     *  is given, the compiler explicitly generates a check for each PE to execute only when its times come.
+     *  If, however, SpaceTimeTransform::NoCheckTime is given, the compiler will not generate such a check, and
+     *  it is up to the programmer to ensure that the UREs already contain such a check.
+     */
+    Func &space_time_transform(const std::vector<Var> &vars,
+                               const std::vector<int> &coefficients,
+                               SpaceTimeTransform check=SpaceTimeTransform::NoCheckTime);
+
+    Func &space_time_transform(const std::vector<Var>& src_vars,
+                               const std::vector<Var>& dst_vars,
+                               const std::vector<int> &coefficients,
+                               SpaceTimeTransform check=SpaceTimeTransform::NoCheckTime);
+
+    Func &space_time_transform(const std::vector<Var>& src_vars,
+                               const std::vector<Var>& dst_vars,
+                               const std::vector<int> &coefficients,
+                               const std::vector<Expr> &reverse,
+                               SpaceTimeTransform check=SpaceTimeTransform::NoCheckTime);
+
+    Func &space_time_transform(const std::vector<Var>& src_vars,
+                               const std::vector<Var>& dst_vars,
+                               const std::vector<std::vector<int>> &coefficients,
+                               const std::vector<std::pair<Expr, Expr>> &reverse,
+                               SpaceTimeTransform check=SpaceTimeTransform::NoCheckTime);
+
+    /* Set the minimum depth of the output channel. This interface works only if this Func writes its output to a channel. */
+   void min_depth(int min_depth) { func.min_depth(min_depth); }
 };
 
 namespace Internal {

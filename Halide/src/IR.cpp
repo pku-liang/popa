@@ -233,9 +233,9 @@ Expr Not::make(Expr a) {
 Expr Select::make(Expr condition, Expr true_value, Expr false_value) {
     internal_assert(condition.defined()) << "Select of undefined\n";
     internal_assert(true_value.defined()) << "Select of undefined\n";
-    internal_assert(false_value.defined()) << "Select of undefined\n";
+    // We allow select without a false value in, e.g. a URE.
+    internal_assert(!false_value.defined() || false_value.type() == true_value.type()) << "Select of mismatched types\n";
     internal_assert(condition.type().is_bool()) << "First argument to Select is not a bool: " << condition.type() << "\n";
-    internal_assert(false_value.type() == true_value.type()) << "Select of mismatched types\n";
     internal_assert(condition.type().is_scalar() ||
                     condition.type().lanes() == true_value.type().lanes())
         << "In Select, vector lanes of condition must either be 1, or equal to vector lanes of arguments\n";
@@ -597,11 +597,15 @@ Stmt Evaluate::make(Expr v) {
 }
 
 Expr Call::make(const Function &func, const std::vector<Expr> &args, int idx) {
+    user_assert(func.has_pure_definition() || func.has_extern_definition() || func.has_decl_signature())
+        << "It seems func " << func.name() << " do not have a declared signature.\n"
+        << "If you have a RECURRENT function, for example, function A defined like this: A(i, ...) = A(i-1, ...),\n"
+        << "you must explictly declare A before defining it, for example: Func A(Int(32)/*return type*/, {i, j}/*arguments*/, Place::Device/*where to run*/) \n";
     internal_assert(idx >= 0 &&
                     idx < func.outputs())
         << "Value index out of range in call to halide function\n";
-    internal_assert(func.has_pure_definition() || func.has_extern_definition())
-        << "Call to undefined halide function\n";
+    // internal_assert(func.has_pure_definition() || func.has_extern_definition())
+    //     << "Call to undefined halide function\n";
     return make(func.output_types()[(size_t)idx], func.name(), args, Halide,
                 func.get_contents(), idx, Buffer<>(), Parameter());
 }
@@ -613,6 +617,7 @@ const char *const intrinsic_op_names[] = {
     "absd",
     "add_image_checks_marker",
     "alloca",
+    "annotate",
     "bitwise_and",
     "bitwise_not",
     "bitwise_or",
@@ -621,6 +626,10 @@ const char *const intrinsic_op_names[] = {
     "bundle",
     "call_cached_indirect_function",
     "cast_mask",
+    "cm_corr_buf_idx",
+    "cm_load_2d",
+    "cm_prefetch_2d",
+    "cm_store_2d",
     "concat_bits",
     "count_leading_zeros",
     "count_trailing_zeros",
@@ -630,6 +639,7 @@ const char *const intrinsic_op_names[] = {
     "dynamic_shuffle",
     "extract_bits",
     "extract_mask_element",
+    "fpga_reg",
     "get_user_context",
     "gpu_thread_barrier",
     "halving_add",
@@ -651,11 +661,20 @@ const char *const intrinsic_op_names[] = {
     "mod_round_to_zero",
     "mul_shift_right",
     "mux",
+    "overlay",
+    "overlay_switch",
     "popcount",
+    "postincrement",
     "prefetch",
     "profiling_enable_instance_marker",
     "promise_clamped",
     "random",
+    "read_array",
+    "read_channel",
+    "read_channel_nb",
+    "read_field",
+    "read_mem_channel",
+    "read_shift_reg",
     "register_destructor",
     "require",
     "require_mask",
@@ -683,6 +702,11 @@ const char *const intrinsic_op_names[] = {
     "undef",
     "unreachable",
     "unsafe_promise_clamped",
+    "write_array",
+    "write_channel",
+    "write_channel_nb",
+    "write_mem_channel",
+    "write_shift_reg",
     "widen_right_add",
     "widen_right_mul",
     "widen_right_sub",
@@ -718,7 +742,8 @@ Expr Call::make(Type type, const std::string &name, const std::vector<Expr> &arg
             << "Number of args to a prefetch call should be even: {base, offset, extent0, stride0, extent1, stride1, ...}\n";
     }
     for (size_t i = 0; i < args.size(); i++) {
-        internal_assert(args[i].defined()) << "Call of " << name << " with argument " << i << " undefined.\n";
+        // Arg must be defined, except for if_then_else, whose else part can be undefined.
+        internal_assert(args[i].defined() || (name == intrinsic_op_names[Call::if_then_else] && i == 2)) << "Call of " << name << " with argument " << i << " undefined.\n";
     }
     if (call_type == Halide) {
         for (const auto &arg : args) {

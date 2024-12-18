@@ -8,7 +8,8 @@ Expr Simplify::visit(const Select *op, ExprInfo *info) {
     ExprInfo t_info, f_info;
     Expr condition = mutate(op->condition, nullptr);
     Expr true_value = mutate(op->true_value, &t_info);
-    Expr false_value = mutate(op->false_value, &f_info);
+    bool has_false_value = op->false_value.defined();
+    Expr false_value = (has_false_value ? mutate(op->false_value, &f_info) : op->false_value);
 
     if (info) {
         info->bounds = ConstantInterval::make_union(t_info.bounds, f_info.bounds);
@@ -16,7 +17,7 @@ Expr Simplify::visit(const Select *op, ExprInfo *info) {
         info->trim_bounds_using_alignment();
     }
 
-    if (may_simplify(op->type)) {
+    if (has_false_value && may_simplify(op->type)) {
         int lanes = op->type.lanes();
         auto rewrite = IRMatcher::rewriter(IRMatcher::select(condition, true_value, false_value), op->type);
 

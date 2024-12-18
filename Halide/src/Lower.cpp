@@ -80,6 +80,32 @@
 #include "VectorizeLoops.h"
 #include "WrapCalls.h"
 
+// T2S related
+#include "../../t2s/src/AddressableBuffer.h"
+#include "../../t2s/src/AutorunKernels.h"
+#include "../../t2s/src/ChannelPromotion.h"
+#include "../../t2s/src/CheckRecursiveCalls.h"
+#include "../../t2s/src/ComputeLoopBounds.h"
+#include "../../t2s/src/CombineChannels.h"
+#include "../../t2s/src/DebugPrint.h"
+#include "../../t2s/src/Devectorize.h"
+#include "../../t2s/src/FlattenLoops.h"
+#include "../../t2s/src/Gather.h"
+#include "../../t2s/src/LateFuse.h"
+#include "../../t2s/src/LoopRemoval.h"
+#include "../../t2s/src/MemorySchedule.h"
+#include "../../t2s/src/MinimizeShregs.h"
+#include "../../t2s/src/NoIfSimplify.h"
+#include "../../t2s/src/Overlay.h"
+#include "../../t2s/src/PatternMatcher.h"
+#include "../../t2s/src/Place.h"
+#include "../../t2s/src/Relay.h"
+#include "../../t2s/src/RemoveDeadDimensions.h"
+#include "../../t2s/src/ScatterAndBuffer.h"
+#include "../../t2s/src/SpaceTimeTransform.h"
+#include "../../t2s/src/StandardizeIRForOpenCL.h"
+#include "../../t2s/src/TriangularLoopOptimize.h"
+
 namespace Halide {
 namespace Internal {
 
@@ -175,6 +201,18 @@ void lower_impl(const vector<Function> &output_funcs,
     Stmt s = schedule_functions(outputs, fused_groups, env, t, any_memoized);
     log("Lowering after creating initial loop nests:", s);
 
+    // Get the global min, max value of loop bounds
+    LoopBounds global_bounds = compute_global_loop_bounds(s);
+
+    debug(1) << "Applying space time transformation...\n";
+    std::map<std::string, RegBound > reg_size_map;
+    s = apply_space_time_transform(s, env, t, reg_size_map);
+    debug(2) << "Lowering after applying space time transformation:\n" << s << "\n\n";
+
+    debug(1) << "Fixing calls' args that correspond to loops marked as removed ...\n";
+    s = fix_call_args_for_removed_loops(s, env);
+    debug(2) << "Lowering after fixing calls' args that correspond to loops marked as removed:\n" << s << "\n\n";
+
     if (any_memoized) {
         debug(1) << "Injecting memoization...\n";
         s = inject_memoization(s, env, pipeline_name, outputs);
@@ -185,6 +223,9 @@ void lower_impl(const vector<Function> &output_funcs,
     debug(1) << "Injecting tracing...\n";
     s = inject_tracing(s, pipeline_name, trace_pipeline, env, outputs, t);
     log("Lowering after injecting tracing:", s);
+
+    debug(1) << "Adding checks for recursice calls\n";
+    check_recursive_calls(env);
 
     debug(1) << "Adding checks for parameters\n";
     s = add_parameter_checks(requirements, s, t);
@@ -208,6 +249,21 @@ void lower_impl(const vector<Function> &output_funcs,
     s = bounds_inference(s, outputs, order, fused_groups, env, func_bounds, t);
     log("Lowering after computation bounds inference:", s);
 
+    // This uniquifies the variable names, so we're good to simplify
+    // after this point. This lets later passes assume syntactic
+    // equivalence means semantic equivalence.
+    debug(1) << "Uniquifying variable names...\n";
+    s = uniquify_variable_names(s);
+    log("Lowering after uniquifying variable names:", s);
+
+    debug(1) << "Partitioning loops to simplify boundary conditions...\n";
+    s = partition_loops(s);
+    log("Lowering after partitioning loops :", s);
+
+    debug(1) << "Simplifying IfThenElse but keeping unit loops...\n";
+    s = no_if_simplify(s, true);
+    log("Lowering after simplifying IfThenElse but keeping unit loops:\n", s);
+
     debug(1) << "Asserting that all split factors are positive...\n";
     s = add_split_factor_checks(s, env);
     log("Lowering after asserting that all split factors are positive:", s);
@@ -219,17 +275,6 @@ void lower_impl(const vector<Function> &output_funcs,
     debug(1) << "Performing sliding window optimization...\n";
     s = sliding_window(s, env);
     log("Lowering after sliding window:", s);
-
-    // This uniquifies the variable names, so we're good to simplify
-    // after this point. This lets later passes assume syntactic
-    // equivalence means semantic equivalence.
-    debug(1) << "Uniquifying variable names...\n";
-    s = uniquify_variable_names(s);
-    log("Lowering after uniquifying variable names:", s);
-
-    debug(1) << "Simplifying...\n";
-    s = simplify(s, false);  // Storage folding and allocation bounds inference needs .loop_max symbols
-    log("Lowering after first simplification:", s);
 
     debug(1) << "Simplifying correlated differences...\n";
     s = simplify_correlated_differences(s);
@@ -252,6 +297,33 @@ void lower_impl(const vector<Function> &output_funcs,
     s = remove_undef(s);
     log("Lowering after removing code that depends on undef values:", s);
 
+    if (t.has_feature(Target::IntelFPGA)) {
+        debug(1) << "Placing device functions...\n";
+        s = place_device_functions(s, env, t);
+        log("Lowering after placing device functions:", s);
+
+        debug(1) << "Replacing references with channels and shift registers...\n";
+        add_reference_names(s, env, reg_size_map);
+        s = replace_references_with_channels(s, env, global_bounds);
+        s = replace_references_with_shift_registers(s, env, reg_size_map);
+        log("Lowering after replacing references with channels and shift registers:", s);
+    }
+
+    debug(1) << "Simplifying IfThenElse without keeping unit loops...\n";
+    s = no_if_simplify(s, false);
+    log("Lowering after simplifying IfThenElse without keeping unit loops:", s);
+
+    if (t.has_feature(Target::IntelFPGA)) {
+        debug(1) << "Minimizing shift registers...\n";
+        map<string, ShiftRegAlloc> func_to_regalloc;
+        s = minimize_shift_registers(s, env, func_to_regalloc);
+        log("Lowering after minimizing shift registers:", s);
+
+        debug(1) << "Relaying...\n";
+        s = relay_data(s, env, func_to_regalloc);
+        log("Lowering after relaying:", s);
+    }
+
     debug(1) << "Performing storage folding optimization...\n";
     s = storage_folding(s, env);
     log("Lowering after storage folding:", s);
@@ -268,13 +340,17 @@ void lower_impl(const vector<Function> &output_funcs,
     s = lower_safe_promises(s);
     log("Lowering after discarding safe promises:", s);
 
-    debug(1) << "Dynamically skipping stages...\n";
-    s = skip_stages(s, outputs, fused_groups, env);
-    log("Lowering after dynamically skipping stages:", s);
+    // debug(1) << "Dynamically skipping stages...\n";
+    // s = skip_stages(s, outputs, fused_groups, env);
+    // log("Lowering after dynamically skipping stages:", s);
 
-    debug(1) << "Forking asynchronous producers...\n";
-    s = fork_async_producers(s, env);
-    log("Lowering after forking asynchronous producers:", s);
+    if (!t.features_any_of({ Target::IntelFPGA, Target::IntelGPU })) {
+        debug(1) << "Forking asynchronous producers...\n";
+        s = fork_async_producers(s, env);
+        log("Lowering after forking asynchronous producers:", s);
+    } else {
+        // We will generate code so that a producer communicates with a consumer in a channel.
+    }
 
     debug(1) << "Destructuring tuple-valued realizations...\n";
     s = split_tuples(s, env);
@@ -295,6 +371,12 @@ void lower_impl(const vector<Function> &output_funcs,
     s = storage_flattening(s, outputs, env, t);
     log("Lowering after storage flattening:", s);
 
+    if (t.has_feature(Target::IntelGPU)) {
+        debug(1) << "Applying memory schedule...\n";
+        s = do_memory_schedule(s, env);
+        debug(2) << "Lowering after memory schedule:\n" << s << "\n\n";
+    }
+
     debug(1) << "Adding atomic mutex allocation...\n";
     s = add_atomic_mutex(s, outputs);
     log("Lowering after adding atomic mutex allocation:", s);
@@ -311,13 +393,21 @@ void lower_impl(const vector<Function> &output_funcs,
         debug(1) << "Skipping rewriting memoized allocations...\n";
     }
 
+    map<string, Place> funcs_using_mem_channels;
+    vector<std::pair<string, Expr>> letstmts_backup;
+    if (t.has_feature(Target::IntelFPGA)) {
+        debug(1) << "Replacing references with mem channels...\n";
+        s = replace_references_with_mem_channels(s, env, funcs_using_mem_channels, letstmts_backup);
+        log("Lowering after replacing references with mem channels:", s);
+    }
+
     if (will_inject_host_copies) {
         debug(1) << "Selecting a GPU API for GPU loops...\n";
         s = select_gpu_api(s, t);
         log("Lowering after selecting a GPU API:", s);
 
         debug(1) << "Injecting host <-> dev buffer copies...\n";
-        s = inject_host_dev_buffer_copies(s, t);
+        s = inject_host_dev_buffer_copies(s, t, env, order);
         log("Lowering after injecting host <-> dev buffer copies:", s);
 
         debug(1) << "Selecting a GPU API for extern stages...\n";
@@ -325,7 +415,7 @@ void lower_impl(const vector<Function> &output_funcs,
         log("Lowering after selecting a GPU API for extern stages:", s);
     }
 
-    debug(1) << "Simplifying...\n";
+    debug(1) << "Second simplification...\n";
     s = simplify(s);
     s = unify_duplicate_lets(s);
     log("Lowering after second simplification:", s);
@@ -338,18 +428,58 @@ void lower_impl(const vector<Function> &output_funcs,
     s = simplify_correlated_differences(s);
     log("Lowering after simplifying correlated differences:", s);
 
+    if (t.has_feature(Target::IntelFPGA)) {
+        debug(1) << "Devectorize unsuitable loops...\n";
+        s = devectorize(s);
+        log("Lowering after devectorizing unsuitable loops:\n", s);
+    }
+
+    debug(1) << "Vectorizing...\n";
+    s = vectorize_loops(s, t, env);
+    log("Lowering after vectorizing:", s);
+    s = simplify(s);
+    log("Lowering after simplify after vectorizing:", s);
+
+    debug(1) << "Combining channels ...\n";
+    s = combine_channels(s);
+    log("Lowering after combining channels:", s);
+
+    debug(1) << "Remove Lets and LetStmts in funcs with buffering or scattering...\n";
+    {
+        std::set<string> funcs;
+        for(auto entry : env){
+            bool with_buffer = entry.second.definition().schedule().buffer_params().size() > 0;
+            bool with_scatter = entry.second.definition().schedule().scatter_params().size() > 0;
+            if (with_buffer || with_scatter) {
+                funcs.insert(entry.first);
+            }
+        }
+        s = simplify(remove_lets(s, true, true, true, false, funcs));
+    }
+    debug(2) << "Lowering after removing Lets and LetStmts in funcs with buffering or scattering:\n" << s <<"\n\n";
+
+    debug(1) << "Scattering and buffering...\n";
+    s = simplify(scatter_buffer(s,env));
+    debug(2) << "Lowering after Scattering and buffering:\n"
+             << s << "\n\n";
+
+    debug(1) << "Inserting addressable buffer...\n";
+    s = simplify(insert_addressable_buffer(s, env));
+    debug(2) << "Lowering after Scattering and buffering:\n"
+             << s << "\n\n";
+
+    debug(1) << "Gathering...\n";
+    s = simplify(gather_data(s, env));
+    debug(2) << "Lowering after Gathering:\n"
+             << s << "\n\n";
+
     debug(1) << "Bounding constant extent loops...\n";
     s = bound_constant_extent_loops(s);
     log("Lowering after bounding constant extent loops:", s);
 
     debug(1) << "Unrolling...\n";
-    s = unroll_loops(s);
+    s = unroll_loops(s, env);
     log("Lowering after unrolling:", s);
-
-    debug(1) << "Vectorizing...\n";
-    s = vectorize_loops(s, env);
-    s = simplify(s);
-    log("Lowering after vectorizing:", s);
 
     if (t.has_gpu_feature() ||
         t.has_feature(Target::Vulkan)) {
@@ -358,10 +488,10 @@ void lower_impl(const vector<Function> &output_funcs,
         log("Lowering after injecting per-block gpu synchronization:", s);
     }
 
-    debug(1) << "Detecting vector interleavings...\n";
-    s = rewrite_interleavings(s);
-    s = simplify(s);
-    log("Lowering after rewriting vector interleavings:", s);
+    // debug(1) << "Detecting vector interleavings...\n";
+    // s = rewrite_interleavings(s);
+    // s = simplify(s);
+    // log("Lowering after rewriting vector interleavings:", s);
 
     debug(1) << "Partitioning loops to simplify boundary conditions...\n";
     s = partition_loops(s);
@@ -385,9 +515,14 @@ void lower_impl(const vector<Function> &output_funcs,
     s = hoist_loop_invariant_if_statements(s);
     log("Lowering after hoisting loop invariant if statements:", s);
 
-    debug(1) << "Injecting early frees...\n";
-    s = inject_early_frees(s);
-    log("Lowering after injecting early frees:", s);
+    if (!t.has_feature(Target::IntelFPGA)) {
+        debug(1) << "Injecting early frees...\n";
+        s = inject_early_frees(s);
+        log("Lowering after injecting early frees:", s);
+    } else {
+        // We issue kernels and immediately return without waiting for their completion.
+        // So the host memory might still be needed to transfer data. Do not free.
+    }
 
     if (t.has_feature(Target::FuzzFloatStores)) {
         debug(1) << "Fuzzing floating point stores...\n";
@@ -398,6 +533,12 @@ void lower_impl(const vector<Function> &output_funcs,
     debug(1) << "Simplifying correlated differences...\n";
     s = simplify_correlated_differences(s);
     log("Lowering after simplifying correlated differences:", s);
+
+    if (t.has_feature(Target::IntelFPGA)) {
+        debug(1) << "Replace memory channel with references...\n";
+        s = replace_mem_channels(s, env, letstmts_backup);
+        log("Lowering after replacing memory channels:", s);
+    }
 
     debug(1) << "Bounding small allocations...\n";
     s = bound_small_allocations(s);
@@ -417,6 +558,16 @@ void lower_impl(const vector<Function> &output_funcs,
 
     debug(1) << "Simplifying...\n";
     s = common_subexpression_elimination(s);
+
+    debug(1) << "Matching compute patterns...\n";
+    s = match_patterns(s);
+    log("Lowering after matching patterns:", s);
+
+    if (t.has_feature(Target::IntelFPGA)) {
+        debug(1) << "Inserting FPGA register calls\n";
+        s = insert_fpga_reg(s, env);
+        log("Lowering after inserting FPGA register calls:", s);
+    }
 
     debug(1) << "Lowering unsafe promises...\n";
     s = lower_unsafe_promises(s, t);
@@ -455,8 +606,51 @@ void lower_impl(const vector<Function> &output_funcs,
         log("Lowering after stripping asserts:", s);
     }
 
-    debug(1) << "Lowering after final simplification:\n"
-             << s << "\n\n";
+    debug(1) << "Late fuse...\n";
+    s = do_late_fuse(s, env);
+    log("Lowering after late fuse:\n", s);
+
+    debug(1) << "Promoting channels...\n";
+    s = channel_promotion(s);
+    log("Lowering after channel promotion:", s);
+
+    // For overlay, we don't need to flatten task loops.
+    char *overlay_num = getenv("HL_OVERLAY_NUM");
+    if (t.has_feature(Target::IntelFPGA) && overlay_num == NULL) {
+        debug(1) << "Flatten the loops...\n";
+        s = simplify(flatten_loops(s, env));
+        log("Lowering after loop flattening:", s);
+    }
+
+    debug(1) << "Flatten triangular loop...\n";
+    s = flatten_tirangualr_loop_nest(s, env);
+    log("Lowering after triangular loop optimizing:", s);
+
+    if (getenv("DISABLE_AUTORUN") == NULL) {
+        if (t.has_feature(Target::IntelFPGA)) {
+            debug(1) << "Making device funcs as autorun ...\n";
+            s = autorun_kernels(s, env);
+            log("Lowering after making device funcs as autorun:", s);
+        }
+    }
+
+    debug(1) << "Creating overlay scheduler...\n";
+    s = simplify(create_overlay_schedule(s, env));
+    log("Lowering after creating overlay scheduler:\n", s);
+
+    debug(1) << "Remove lets...\n";
+    s = remove_lets(s, true, false, false, false, {});
+    log("Lowering after removing lets:", s);
+
+    // The code generator should blindly generate code according to the IR, without tricks if possible.
+    // So here standardize the IR to make it have the same abstraction level as the target language to generate.
+    // Although below it is done only for OpenCL and clear code gen only, ideally it should be done for any target
+    // HW and language, and any code generator.
+    if (t.features_any_of({Target::OpenCL}) && (getenv("CLEARCODE") != NULL)) {
+        debug(1) << "Standardize IR for generating OpenCL code...\n";
+        s = standardize_ir_for_opencl_code_gen(s);
+        log("Lowering after standardizing IR for generating OpenCL code:", s);
+    }
 
     if (!custom_passes.empty()) {
         for (size_t i = 0; i < custom_passes.size(); i++) {

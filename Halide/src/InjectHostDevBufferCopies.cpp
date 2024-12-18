@@ -7,6 +7,8 @@
 #include "IROperator.h"
 #include "IRPrinter.h"
 #include "Substitute.h"
+#include "../../t2s/src/BuildCallRelation.h"
+#include "../../t2s/src/DebugPrint.h"
 
 #include <map>
 #include <utility>
@@ -729,6 +731,14 @@ class FindOutermostProduce : public IRVisitor {
         result = op;
     }
 
+    void visit(const For *op) override {
+        if (op->for_type == ForType::GPUBlock) {
+            result = op;
+        } else {
+            op->body.accept(this);
+        }
+    }
+
 public:
     Stmt result;
 };
@@ -809,9 +819,239 @@ public:
     }
 };
 
+// For an Intel FPGA, we use OpenCL runtime with multiple command queues. We enqueue every (non-autorun)
+// kernel to a command queue, flush it, and do not wait for it to finish. But after we launch the
+// (unique) kernel that output the final results from the FPGA, we should wait for all the kernels, including
+// this output kernel, to finish, and set dirty the output buffer, and free the buffers of the other kernels.
+// So for Intel FPGAs, we have the followinig two classes to correct the IR:
+//    1. GatherAndRemoveFPGABufferActions: gather all the necessary buffer actions, and remove them from the IR
+//    2. ApplyFPGABufferActions: append the gathered buffer actions behind the ouptut kernel.
+class GatherAndRemoveFPGABufferActions : public IRMutator {
+    using IRMutator::visit;
+
+public:
+    GatherAndRemoveFPGABufferActions(const vector<string> &_FPGA_kernels) :
+        FPGA_kernels(_FPGA_kernels) {
+            in_an_FPGA_kernel = false;
+    }
+
+public:
+    bool is_injected_buffer_action_for_FPGA(const Stmt &stmt) {
+        if (in_an_FPGA_kernel) {
+            if (stmt.as<LetStmt>() != NULL) {
+                const LetStmt *let = stmt.as<LetStmt>();
+                const Expr value = let->value;
+                if (value.as<Call>() != NULL) {
+                    const Call *call = value.as<Call>();
+                    if (call->name == "halide_device_free" || call->name == "halide_device_and_host_free") {
+                        return true;
+                    }
+                }
+            }
+            if (stmt.as<Evaluate>() != NULL) {
+                const Evaluate *eval = stmt.as<Evaluate>();
+                const Expr value = eval->value;
+                if (value.as<Call>() != NULL) {
+                    const Call *call = value.as<Call>();
+                    if (call->name == Call::buffer_set_device_dirty) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    Expr mutate(const Expr &expr) override {
+        return IRMutator::mutate(expr);
+    }
+
+    Stmt mutate(const Stmt &stmt) override {
+        if (is_injected_buffer_action_for_FPGA(stmt)) {
+            if (FPGA_buffer_actions.find(kernel_name) == FPGA_buffer_actions.end()) {
+                FPGA_buffer_actions[kernel_name] = call_extern_and_assert("halide_opencl_wait_for_kernels_finish", {});
+            }
+            FPGA_buffer_actions[kernel_name] = Block::make(FPGA_buffer_actions[kernel_name], stmt);
+            debug(4) << "Buffer action for FPGA: ****\n" << stmt << "******\n\n";
+            // Effectively remove the buffer action from its current position
+            Stmt do_nothing = Evaluate::make(Expr(0));
+            return do_nothing;
+        }
+
+        if (stmt.as<ProducerConsumer>() != NULL) {
+            const ProducerConsumer *pc = stmt.as<ProducerConsumer>();
+            if (pc->is_producer && (std::find(FPGA_kernels.begin(), FPGA_kernels.end(), pc->name) != FPGA_kernels.end())) {
+                in_an_FPGA_kernel = true;
+                kernel_name = pc->name;
+            } else {
+                in_an_FPGA_kernel = false;
+            }
+        }
+
+        return IRMutator::mutate(stmt);
+    }
+
+public:
+    map<string, Stmt>  FPGA_buffer_actions; // All the actions to be put behind the output kernel
+
+private:
+    const vector<string> &FPGA_kernels; // Funcs running on an FPGA
+    bool  in_an_FPGA_kernel;            // Current part of IR is for an FPGA kernel.
+    string kernel_name;
+};
+
+class ApplyFPGABufferActions : public IRMutator {
+    using IRMutator::visit;
+
+public:
+    ApplyFPGABufferActions(const map<string, string> &_names_to_match_for_output_kernel, const map<string, Stmt> &_FPGA_buffer_actions) :
+        names_to_match_for_output_kernel(_names_to_match_for_output_kernel), FPGA_buffer_actions(_FPGA_buffer_actions) { }
+
+public:
+    Stmt visit(const ProducerConsumer *op) override {
+        if (op->is_producer) {
+            if (names_to_match_for_output_kernel.find(op->name) != names_to_match_for_output_kernel.end()) {
+                // This is the output kernel. Simply append all the buffer actions behind it.
+                string output_kernel = names_to_match_for_output_kernel.at(op->name);
+                internal_assert(FPGA_buffer_actions.find(output_kernel) != FPGA_buffer_actions.end());
+                Stmt new_stmt = ProducerConsumer::make(op->name, true, Block::make(op->body, FPGA_buffer_actions.at(output_kernel)));
+                return new_stmt;
+            }
+        }
+
+        Stmt new_stmt = ProducerConsumer::make(op->name, op->is_producer, mutate(op->body));
+        return new_stmt;
+    }
+
+private:
+    const map<string, string> &names_to_match_for_output_kernel; // We process IR from the outermost to the innermost level. When we encounter IR like
+                                                                 // "Produce x ...", and x is one of the given names, this piece of IR
+                                                                 // is for the unique output kernel on an FPGA that outputs the final results.
+    const map<string, Stmt> &FPGA_buffer_actions;                // All the actions to be put behind the output kernel
+};
+
 }  // namespace
 
-Stmt inject_host_dev_buffer_copies(Stmt s, const Target &t) {
+
+vector<string> find_consumers_on_a_place(const vector<string> &all_consumers,  const std::map<string, Function> &env, Place place) {
+    vector<string> consumers;
+    for (auto c : all_consumers) {
+        if (env.at(c).place() == place) {
+            consumers.push_back(c);
+        }
+    }
+    return consumers;
+}
+
+std::vector<string> sort_functions(const std::vector<string> &funcs, const std::vector<string> &order) {
+    std::vector<string> sorted_funcs;
+    for (const auto &o : order) {
+        auto it = std::find(funcs.begin(), funcs.end(), o);
+        if (it != funcs.end()) {
+            sorted_funcs.push_back(o);
+        }
+    }
+    return sorted_funcs;
+}
+
+Stmt move_around_host_dev_buffer_copies(Stmt s, const Target &t, const std::map<string, Function> &env, const std::vector<string> &order) {
+    // In the current IR, right below every FPGA kernel, we may set device dirty for the output buffer of the kernel, if any,
+    // and free the input buffers of the kernel, if any. The assumption is that the kernel has been launched and finished.
+    // However, this is not the case: for an Intel FPGA, we use OpenCL runtime with multiple command queues; We enqueue every
+    // (non-autorun) kernel to a command queue, flush it, and do not wait for it to finish.
+    // Therefore, we need correct the IR to be in accordance with what really happens in runtime.
+    // Here, after we launch the (unique) kernel that output the final results from the FPGA, we should wait for all the kernels,
+    // including this output kernel, to finish, and then set dirty and free buffers. In other words, we move all the FPGA
+    // kernels' actions after they finish to be behind that unique output kernel.
+    if (t.has_feature(Target::IntelFPGA)) {
+        vector<string> FPGA_kernels;
+        vector<string> output_kernels;
+        map<string, vector<string>> call_graph = build_call_graph(env, true, true);
+        map<string, vector<string>> reverse_call_graph = build_reverse_call_graph(call_graph);
+        // The output kernel is on the device, and has a single consumer, which is a host func.
+        // It is also possible that the output kernel has no consumer, in which case, its output
+        // needs to be copied explicitly by the programmer with halide_copy_to_host.
+        for (auto r : reverse_call_graph) {
+            const Function &f = env.at(r.first);
+            if (f.place() == Place::Device) {
+                FPGA_kernels.push_back(r.first);
+                bool is_output_kernel = false;
+                if (r.second.size() == 0) { // no consumer at all
+                    is_output_kernel = true;
+                } else {
+                    // Consumers must be either all on the device, or all on the host.
+                    vector<string> host_consumers   = find_consumers_on_a_place(r.second, env, Place::Host);
+                    vector<string> device_consumers = find_consumers_on_a_place(r.second, env, Place::Device);
+                    user_assert(host_consumers.size() == 0 || device_consumers.size() == 0) << "Device function " << r.first
+                            << " has both consumers on the host (" << to_string<string>(host_consumers, true)
+                            << " ) and consumers on the device (" << to_string<string>(device_consumers, true)
+                            << "). Consumers must be either all on the device, or all on the host. For example, the following is wrong:\n"
+                            << "\t Func f(Place::Device), g(Place::Device), h(Place::Host);\n"
+                            << "\t f(...) = ...\n"
+                            << "\t g(...) = f(...)\n"
+                            << "\t h(...) = f(...)\n"
+                            << "because f is consumed in both host and device. One may fix the issue like this:\n"
+                            << "\t Func fh(Place::Device);\n"
+                            << "\t fh(...) = f(...)\n"
+                            << "\t h(...) = fh(...)\n"
+                            << "Now all the consumers of f are on the device. And fh has a single consumer on the host.\n";
+                    if (host_consumers.size() == 1) {
+                        is_output_kernel = true;
+                    }
+                }
+                if (is_output_kernel) {
+                    // user_assert(output_kernel == "") << "There are two FPGA kernels, each having no consumers or having one consumer on the host: "
+                    //         << output_kernel << " and " << r.first << ".\n"
+                    //         << "Suggestion: When an FPGA kernel has no consumer, or has one consumer on the host, it is supposed to be an output "
+                    //         << "kernel (generating the final results). Currently, we require such a kernel to be unique.\n";
+                    output_kernels.push_back(r.first);
+                }
+            }
+        }
+        user_assert(FPGA_kernels.empty() || output_kernels.size() > 0) << "No output kernel found for FPGA. An output kernel on FPGA has "
+                << "no consumer, or has a single consumer on the  host. One and only one such output kernel is expected.\n";
+
+        if (!FPGA_kernels.empty()) {
+            debug(2) << "print buffer act" << s;
+            GatherAndRemoveFPGABufferActions gatherer(FPGA_kernels);
+            s = gatherer.mutate(s);
+
+            // If several UREs are merged, and the the output function is part of them, these UREs are nestly defined.
+            // The one of them that appears at the outermost of the nest should be treated as the output kernel.
+            map<string, string> func_to_representative = map_func_to_representative(env);
+            if (output_kernels.size() > 1) {
+                auto it = output_kernels.begin();
+                while (it != output_kernels.end()) {
+                    auto func = env.at(*it);
+                    auto isolated_from = func.isolated_from_as_consumer();
+                    if (!isolated_from.empty()) {
+                        const string &represenative = func_to_representative.at(isolated_from);
+                        auto representative_func = env.at(represenative);
+                        auto merged_ures = representative_func.merged_func_names();
+                        auto sorted_ures = sort_functions(merged_ures, order);
+                        if (!merged_ures.empty() && isolated_from != sorted_ures.back()) {
+                            it = output_kernels.erase(it);
+                        } else it++;
+                    }
+                }
+            }
+            map<string, string> names_to_match_for_output_kernel;
+            for (size_t i = 0; i < output_kernels.size(); i++) {
+                const string &represenative = func_to_representative.at(output_kernels[i]);
+                for (auto entry : func_to_representative) {
+                    if (entry.second == represenative) {
+                        names_to_match_for_output_kernel[entry.first] = output_kernels[i];
+                    }
+                }
+            }
+            s = ApplyFPGABufferActions(names_to_match_for_output_kernel, gatherer.FPGA_buffer_actions).mutate(s);
+        }
+    }
+
+    return s;
+}
+
+Stmt inject_host_dev_buffer_copies(Stmt s, const Target &t, const std::map<string, Function> &env, const std::vector<string> &order) {
     // Hexagon code assumes that the host-based wrapper code
     // handles all copies to/from device, so this isn't necessary;
     // furthermore, we would actually generate wrong code by proceeding
@@ -834,6 +1074,8 @@ Stmt inject_host_dev_buffer_copies(Stmt s, const Target &t) {
         s = InjectBufferCopiesForInputsAndOutputs(outermost.result).mutate(s);
     }
 
+    // If necessary, ajust the positions where the buffer actions are placed.
+    s = move_around_host_dev_buffer_copies(s, t, env, order);
     return s;
 }
 

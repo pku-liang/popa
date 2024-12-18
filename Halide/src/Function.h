@@ -21,6 +21,7 @@ struct ExternFuncArgument;
 class Parameter;
 class Tuple;
 class Var;
+class Overlay;
 
 /** An enum to specify calling convention for extern stages. */
 enum class NameMangling {
@@ -112,6 +113,9 @@ public:
                    std::map<FunctionPtr, FunctionPtr> &copied_map) const;
     // @}
 
+    /** Is this function declared with return type(s) and arguments? */
+    bool has_decl_signature() const;
+
     /** Add a pure definition to this function. It may not already
      * have a definition. All the free variables in 'value' must
      * appear in the args list. 'value' must not depend on any
@@ -150,14 +154,31 @@ public:
     /** Get the init definition. */
     const Definition &definition() const;
 
+    /** Get a mutable handle to the declared arguments.
+     *  If the func is declared without a signature,
+     *  the returned arguments vector is empty.  */
+    std::vector<Expr> &decl_args();
+
+    /** Get the declared arguments. */
+    const std::vector<Expr> &decl_args() const;
+
     /** Get the pure arguments. */
     const std::vector<std::string> &args() const;
+
+    /** Get a mutable handle to the specified arguments' mins and extents.  */
+    std::map<std::string, std::pair<Expr, Expr>> &arg_min_extents();
+
+    /** Get a handle to the specified arguments' mins and extents.  */
+    const std::map<std::string, std::pair<Expr, Expr>> &arg_min_extents() const;
 
     /** Get the dimensionality. */
     int dimensions() const;
 
     /** Get the number of outputs. */
     int outputs() const;
+
+    /** Get a mutable handle to the output types */
+    std::vector<Type> &output_types();
 
     /** Get the types of the outputs. */
     const std::vector<Type> &output_types() const;
@@ -176,6 +197,33 @@ public:
      * unique_name.
      */
     const std::vector<Expr> &values() const;
+
+    /** Does this function has merged definitions? */
+    bool has_merged_defs() const;
+
+    /** Does this function has shift register? */
+    bool has_shift_reg(bool is_set = false); 
+
+    /** Get the names of the merged functions. The order should be kept. */
+    std::vector<std::string> merged_func_names() const;
+
+    /** Get a constant hanlde to the name of the function from which this function is isolated as a producer. */
+    const std::string &isolated_from_as_producer() const;
+
+    /** Get a handle to the name of the function from which this function is isolated as a producer. */
+    std::string &isolated_from_as_producer();
+
+    /** Get a constant handle to operands with which this function is isolated as a producer. */
+    const std::vector<Expr> &isolated_operands_as_producer() const;
+
+    /** Get a handle to operands with which this function is isolated as a producer. */
+    std::vector<Expr> &isolated_operands_as_producer();
+
+    /** Get a constant hanlde to the name of the function from which this function is isolated as a consumer. */
+    const std::string &isolated_from_as_consumer() const;
+
+    /** Get a handle to the name of the function from which this function is isolated as a consumer. */
+    std::string &isolated_from_as_consumer();
 
     /** Does this function have a pure definition? */
     bool has_pure_definition() const;
@@ -306,6 +354,17 @@ public:
      * add new definitions. */
     bool frozen() const;
 
+    /** Set the place where the function runs. This should be called only
+     * when the function is created. After that, do not call this, as
+     * the place of the function should never change. */
+    void place(Place place);
+
+    /** The place where the function runs. */
+    Place place() const;
+
+    Overlay &overlay() const;
+    void overlay(Overlay &overlay);
+
     /** Make a new Function with the same lifetime as this one, and
      * return a strong reference to it. Useful to create Functions which
      * have circular references to this one - e.g. the wrappers
@@ -355,6 +414,17 @@ public:
     /** Define the output buffers. If the Function has types specified, this can be called at
      * any time. If not, it can only be called for a Function with a pure definition. */
     void create_output_buffers(const std::vector<Type> &types, int dims) const;
+
+    std::pair<Expr, Expr> get_bounds(const std::string &name) const;
+    /** For each of the given loop variabls, set the min and extent. */
+    void set_bounds(const std::vector<std::string> &vars, const std::vector<Expr> &mins, const std::vector<Expr> &extents);
+
+    /* Set the minimum depth of the output channel. Meaningful only if this function writes its output to a channel. */
+    void min_depth(int min_depth);
+
+    /* Get the minimum depth of the output channel. Meaningful only if this function writes its output to a channel. */
+    int min_depth() const;
+
 };
 
 /** Deep copy an entire Function DAG. */

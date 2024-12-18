@@ -6,6 +6,9 @@
  */
 
 #include "Expr.h"
+#include "Function.h"
+
+#include <map>
 
 namespace Halide {
 namespace Internal {
@@ -13,7 +16,7 @@ namespace Internal {
 /** Take a statement with for loops marked for unrolling, and convert
  * each into several copies of the innermost statement. I.e. unroll
  * the loop. */
-Stmt unroll_loops(const Stmt &);
+Stmt unroll_loops(Stmt, const std::map<std::string, Function> &);
 
 }  // namespace Internal
 }  // namespace Halide

@@ -61,6 +61,8 @@ public:
     /** Create an instance of CodeGen_LLVM suitable for the target. */
     static std::unique_ptr<CodeGen_LLVM> new_for_target(const Target &target, llvm::LLVMContext &context);
 
+    /** Used for emitting device source code. */
+    virtual void compile_to_devsrc(const Module &input);
     /** Takes a halide Module and compiles it to an llvm Module. */
     virtual std::unique_ptr<llvm::Module> compile(const Module &module);
 

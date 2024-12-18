@@ -378,6 +378,12 @@ Expr make_const_helper(Type t, T val) {
         return UIntImm::make(t, (uint64_t)val);
     } else if (t.is_float()) {
         return FloatImm::make(t, (double)val);
+    } else if (t.is_complex()) {
+        if (t.bits() == 64) {
+            return UIntImm::make(t, (uint64_t)val);
+        } else {
+            return UIntImm::make(t, (__uint128_t)val);
+        }
     } else {
         internal_error << "Can't make a constant of type " << t << "\n";
         return Expr();
@@ -1026,6 +1032,15 @@ Expr BufferBuilder::build() const {
                                make_const(UInt(64), halide_buffer_flag_device_dirty),
                                make_zero(UInt(64)));
     }
+    if (channel) {
+        switch (channel) {
+            case 1: flags = flags | make_const(UInt(64), halide_buffer_flag_channel_1); break;
+            case 2: flags = flags | make_const(UInt(64), halide_buffer_flag_channel_2); break;
+            case 3: flags = flags | make_const(UInt(64), halide_buffer_flag_channel_3); break;
+            case 4: flags = flags | make_const(UInt(64), halide_buffer_flag_channel_4); break;
+            default: internal_error;
+        }
+    }
     args[9] = flags;
 
     Expr e = Call::make(type_of<struct halide_buffer_t *>(), Call::buffer_init, args, Call::Extern);
@@ -1497,21 +1512,25 @@ Expr select(Expr condition, Expr true_value, Expr false_value) {
     }
 
     // Coerce int literals to the type of the other argument
-    if (as_const_int(true_value)) {
-        true_value = cast(false_value.type(), std::move(true_value));
-    }
-    if (as_const_int(false_value)) {
-        false_value = cast(true_value.type(), std::move(false_value));
+    if (false_value.defined()) {
+        if (as_const_int(true_value)) {
+            true_value = cast(false_value.type(), std::move(true_value));
+        }
+        if (as_const_int(false_value)) {
+            false_value = cast(true_value.type(), std::move(false_value));
+        }
     }
 
     user_assert(condition.type().is_bool())
         << "The first argument to a select must be a boolean:\n"
         << "  " << condition << " has type " << condition.type() << "\n";
 
-    user_assert(true_value.type() == false_value.type())
-        << "The second and third arguments to a select do not have a matching type:\n"
-        << "  " << true_value << " has type " << true_value.type() << "\n"
-        << "  " << false_value << " has type " << false_value.type() << "\n";
+    if (false_value.defined()) {
+        user_assert(true_value.type() == false_value.type())
+            << "The second and third arguments to a select do not have a matching type:\n"
+            << "  " << true_value << " has type " << true_value.type() << "\n"
+            << "  " << false_value << " has type " << false_value.type() << "\n";
+    }
 
     return Select::make(std::move(condition), std::move(true_value), std::move(false_value));
 }
@@ -1521,6 +1540,7 @@ Tuple select(const Tuple &condition, const Tuple &true_value, const Tuple &false
         << "select() on Tuples requires all Tuples to have identical sizes.";
     Tuple result(std::vector<Expr>(condition.size()));
     for (size_t i = 0; i < result.size(); i++) {
+        user_assert(false_value[i].defined()) << "tuple_select requires false values to be defined";
         result[i] = select(condition[i], true_value[i], false_value[i]);
     }
     return result;
@@ -1531,6 +1551,7 @@ Tuple select(const Expr &condition, const Tuple &true_value, const Tuple &false_
         << "select() on Tuples requires all Tuples to have identical sizes.";
     Tuple result(std::vector<Expr>(true_value.size()));
     for (size_t i = 0; i < result.size(); i++) {
+        user_assert(false_value[i].defined()) << "tuple_select requires false values to be defined";
         result[i] = select(condition, true_value[i], false_value[i]);
     }
     return result;
@@ -2313,6 +2334,16 @@ Expr fast_inverse_sqrt(Expr x) {
         return Expr();
     }
 }
+
+Expr conjugate(Expr x) {
+    user_assert(x.type().is_complex()) << "conj only takes complex arguments\n";
+    Type t = x.type();
+    if (t.bits() == 64) {
+        return Internal::Call::make(t, "conjugate_c32", {std::move(x)}, Internal::Call::PureExtern);
+    } else {
+        return Internal::Call::make(t, "conjugate_c64", {std::move(x)}, Internal::Call::PureExtern);
+    }
+ }
 
 Expr floor(Expr x) {
     user_assert(x.defined()) << "floor of undefined Expr\n";

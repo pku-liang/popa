@@ -45,6 +45,9 @@ enum class OutputFileType {
     stmt_html,
     conceptual_stmt_html,
     device_code,
+    oneapi,
+    host_header,
+    host_src,
     mlir
 };
 

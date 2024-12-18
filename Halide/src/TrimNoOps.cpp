@@ -17,6 +17,7 @@ namespace Internal {
 
 using std::string;
 using std::vector;
+using std::map;
 
 namespace {
 
@@ -155,6 +156,10 @@ class IsNoOp : public IRVisitor {
         // If the loop calls an impure function, we can't remove the
         // call to it. Most notably: image_store.
         if (!op->is_pure()) {
+            condition = const_false();
+            return;
+        }
+        if (op->is_intrinsic(Call::write_shift_reg) || op->is_intrinsic(Call::write_channel) || op->is_intrinsic(Call::write_array)) {
             condition = const_false();
             return;
         }
@@ -351,6 +356,10 @@ public:
 };
 
 class TrimNoOps : public IRMutator {
+ public:
+    std::map<std::string, Interval> loop_bounds;
+
+ private:
     using IRMutator::visit;
 
     Stmt visit(const For *op) override {
@@ -404,10 +413,12 @@ class TrimNoOps : public IRMutator {
             return Evaluate::make(0);
         }
 
-        // Simplify the body to take advantage of the fact that the
-        // loop range is now truncated
-        body = simplify(SimplifyUsingBounds(op->name, i).mutate(body));
-
+        // if the loop is unrolled or vectorized, it means it's a space loop, its min and extent should be constant.
+        // and we will do nothing to the bounds of such loop
+        if (op->for_type == ForType::Unrolled || op->for_type == ForType::Vectorized){
+            return For::make(op->name, op->min, op->extent, op->for_type, op->partition_policy, op->device_api, body);
+        }
+        
         string new_min_name = unique_name(op->name + ".new_min");
         string new_max_name = unique_name(op->name + ".new_max");
         string old_max_name = unique_name(op->name + ".old_max");
@@ -437,17 +448,67 @@ class TrimNoOps : public IRMutator {
 
         Expr new_extent = new_max_var - new_min_var;
 
+        Expr loop_extent = new_max - new_min + 1;
+        bool no_loop = can_prove(loop_extent >= 0 && loop_extent <= 1);
+        if (no_loop) {
+            Expr var = Variable::make(Int(32), op->name);
+            Expr cond = (var >= op->min && var < op->extent);
+            Stmt stmt = IfThenElse::make(cond, body);
+            stmt = LetStmt::make(op->name, i.max, stmt);
+            return simplify(stmt);
+        }
+
+        // unrolled/vectorized loop requires constant bounds
+        // if ((op->for_type == ForType::Unrolled || op->for_type == ForType::Vectorized)
+        //         && (!is_const(new_min_var) || !is_const(new_extent))) {
+        //     return Stmt(op);
+        // }
+
+        // Simplify the body to take advantage of the fact that the
+        // loop range is now truncated
+        body = simplify(SimplifyUsingBounds(op->name, i).mutate(body));
+
+
         Stmt stmt = For::make(op->name, new_min_var, new_extent, op->for_type, op->partition_policy, op->device_api, body);
         stmt = LetStmt::make(new_max_name, new_max, stmt);
         stmt = LetStmt::make(new_min_name, new_min, stmt);
         stmt = LetStmt::make(old_max_name, old_max, stmt);
         stmt = simplify(stmt);
+        loop_bounds.insert({op->name, Interval(op->min, op->extent)});
 
         debug(3) << "Rewrote loop.\n"
                  << "Old: " << Stmt(op) << "\n"
                  << "New: " << stmt << "\n";
 
         return stmt;
+    }
+};
+
+class CheckLoopBounds : public IRMutator {
+ public:
+    CheckLoopBounds(map<std::string, Interval> &_lb)
+        : loop_bounds(_lb) {}
+
+    using IRMutator::visit;
+    map<std::string, Interval> &loop_bounds;
+
+    Stmt visit(const For* op) override {
+        Stmt s = mutate(op->body);
+        if (op->for_type == ForType::Unrolled
+            || op->for_type == ForType::Vectorized)
+            if (!is_const(op->min)
+                || !is_const(op->extent)) {
+                    auto bound = loop_bounds.find(op->name);
+                    if (bound != loop_bounds.end()) {
+                        debug(3) << "reverse bounds: "
+                                 << "min=" << bound->second.min
+                                 << " extent=" << bound->second.max;
+                        return For::make(op->name, bound->second.min, bound->second.max,
+                                        op->for_type, op->partition_policy, op->device_api, s);
+                    }
+                }
+        return For::make(op->name, op->min, op->extent,
+                         op->for_type, op->partition_policy, op->device_api, s);
     }
 };
 

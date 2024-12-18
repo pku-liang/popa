@@ -17,6 +17,7 @@
 #include "RealizationOrder.h"
 #include "Serialization.h"
 #include "WasmExecutor.h"
+#include "../../t2s/src/PreprocessBeforeLower.h"
 
 using namespace Halide::Internal;
 
@@ -271,6 +272,20 @@ void Pipeline::add_autoscheduler(const std::string &autoscheduler_name, const Au
     m[autoscheduler_name] = autoscheduler;
 }
 
+std::map<string, Func> Pipeline::compute_environment() const {
+    // Compute an environment
+    std::map<string, Func> env;
+    for (Function f : contents->outputs) {
+        std::map<string, Function> more_funcs = find_transitive_calls(f);
+        for (auto m : more_funcs) {
+            if (env.find(m.first) == env.end()) {
+                env[m.first] = Func(m.second);
+            }
+        }
+    }
+    return env;
+}
+
 Func Pipeline::get_func(size_t index) {
     // Compute an environment
     std::map<string, Function> env;
@@ -278,6 +293,7 @@ Func Pipeline::get_func(size_t index) {
         std::map<string, Function> more_funcs = find_transitive_calls(f);
         env.insert(more_funcs.begin(), more_funcs.end());
     }
+
     // Compute a topological order
     vector<string> order = topological_order(contents->outputs, env);
 
@@ -343,6 +359,28 @@ void Pipeline::compile_to_c(const string &filename,
     m.compile(single_output(filename, m, OutputFileType::c_source));
 }
 
+void Pipeline::compile_to_cm(const vector<Argument> &args,
+                             const string &fn_name,
+                             const Target &target) {
+    Module m = compile_to_module(args, fn_name, target);
+    m.compile(single_output(fn_name, m, OutputFileType::device_code));
+}
+
+void Pipeline::compile_to_oneapi(const vector<Argument> &args,
+                                 const string &fn_name,
+                                 const Target &target) {
+    // check that target has IntelFPGA and OneAPI targets set. Else throw an error
+    user_assert( target.has_feature(Target::IntelFPGA) ) << " IntelFPGA Target not found.\n";
+    user_assert( target.has_feature((Target::OneAPI)) ) << " OneAPI Target not found.\n";
+
+    debug(2) << "OneAPI-compiling for: " << target << "\n";
+    Module m = compile_to_module(args, fn_name, target);
+    if (target.has_feature(Target::IntelFPGA)) {
+        auto ext = get_output_info(target);
+        m.compile(single_output( fn_name + ext.at(OutputFileType::oneapi).extension, m, OutputFileType::oneapi));
+    }
+}
+
 void Pipeline::print_loop_nest() {
     user_assert(defined()) << "Can't print loop nest of undefined Pipeline.\n";
     debug(0) << Halide::Internal::print_loop_nest(contents->outputs);
@@ -383,6 +421,37 @@ void Pipeline::compile_to_multitarget_object_files(const std::string &filename_p
     };
     auto outputs = object_file_outputs(filename_prefix, targets.back());
     compile_multitarget(generate_function_name(), outputs, targets, suffixes, module_producer);
+}
+
+void Pipeline::compile_to_host(const string &filename_prefix,
+                               const vector<Argument> &args,
+                               const std::string &fn_name,
+                               const Target &target) {
+    // compile_jit(target);
+
+    for (Function f : contents->outputs) {
+        std::map<string, Function> more_funcs = find_transitive_calls(f);
+        for (auto m : more_funcs) {
+            if (m.second.place() == Place::Host) {
+                vector<Dim> &dims = m.second.definition().schedule().dims();
+                for (size_t i = 0; i < dims.size(); i++) {
+                    if (dims[i].for_type == ForType::Unrolled || dims[i].for_type == ForType::Vectorized) {
+                        dims[i].for_type = ForType::Serial;
+                        debug(1) << "Warning: serialize unrolled loops and vectorized loops to generate source file on host. \n";
+                    }
+                }
+            }
+        }
+    }
+
+    Module m = compile_to_module(args, fn_name, target);
+    auto ext = get_output_info(target);
+    std::map<OutputFileType, std::string> outputs = {
+        {OutputFileType::device_code, fn_name},
+        {OutputFileType::host_header, filename_prefix + ext.at(OutputFileType::host_header).extension},
+        {OutputFileType::host_src, filename_prefix + ext.at(OutputFileType::host_src).extension},
+    };
+    m.compile(outputs);
 }
 
 void Pipeline::compile_to_file(const string &filename_prefix,
@@ -493,6 +562,10 @@ Module Pipeline::compile_to_module(const vector<Argument> &args,
         user_assert(f.has_pure_definition() || f.has_extern_definition())
             << "Can't compile Pipeline with undefined output Func: " << f.name() << ".\n";
     }
+
+    // Preprocessing for T2S before we reach lower().
+    std::map<string, Func> env = compute_environment();
+    t2s_preprocess_before_lower(env, target);
 
     string new_fn_name(fn_name);
     if (new_fn_name.empty()) {
@@ -1011,6 +1084,10 @@ void Pipeline::realize(JITUserContext *context,
     // the right handler for this particular pipeline run. The
     // user_context is just a pointer to a JITUserContext, which is a
     // member of the JITFuncCallContext which we will declare now:
+
+    if (target.has_feature(Target::IntelFPGA)) {
+        target.set_feature(Target::EnableSynthesis);
+    }
 
     // Ensure the module is compiled.
     compile_jit(target);

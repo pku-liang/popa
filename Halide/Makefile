@@ -71,6 +71,11 @@ LLVM_NM = $(LLVM_BINDIR)/llvm-nm
 LLVM_CXX_FLAGS = -std=c++17  $(filter-out -O% -g -fomit-frame-pointer -pedantic -W% -W, $(shell $(LLVM_CONFIG) --cxxflags | sed -e 's/ -D_GLIBCXX_ASSERTIONS / /g' -e 's/\\/\//g' -e 's/\([a-zA-Z]\):/\/\1/g;s/-D/ -D/g;s/-O/ -O/;s/c++14/c++17/g'))
 OPTIMIZE ?= -O3
 OPTIMIZE_FOR_BUILD_TIME ?= -O0
+OPTIMIZE_RUNTIME ?= -O3
+
+# By default, T2S will generate OpenCL code for Intel FPGAs, where we need use multiple command queues.
+# To disable multiple command queues, set this variable to 0
+OCL_MULTI_CMD_Q ?= 1
 
 CLANG ?= $(LLVM_BINDIR)/clang
 CLANG_VERSION = $(shell $(CLANG) --version)
@@ -125,6 +130,7 @@ WITH_WEBASSEMBLY ?= $(findstring webassembly, $(LLVM_COMPONENTS))
 # AMDGPU target is WIP
 WITH_AMDGPU ?= $(findstring amdgpu, $(LLVM_COMPONENTS))
 WITH_OPENCL ?= not-empty
+WITH_ONEAPI ?= not-empty
 WITH_METAL ?= not-empty
 WITH_D3D12 ?= not-empty
 WITH_VULKAN ?= not-empty
@@ -157,6 +163,9 @@ AMDGPU_LLVM_CONFIG_LIB=$(if $(WITH_AMDGPU), amdgpu, )
 
 OPENCL_CXX_FLAGS=$(if $(WITH_OPENCL), -DWITH_OPENCL, )
 OPENCL_LLVM_CONFIG_LIB=$(if $(WITH_OPENCL), , )
+
+ONEAPI_CXX_FLAGS=$(if $(WITH_ONEAPI), -DWITH_OPENCL, )
+ONEAPI_LLVM_CONFIG_LIB=$(if $(WITH_ONEAPI), , )
 
 METAL_CXX_FLAGS=$(if $(WITH_METAL), -DWITH_METAL, )
 METAL_LLVM_CONFIG_LIB=$(if $(WITH_METAL), , )
@@ -212,6 +221,7 @@ CXX_FLAGS += $(HEXAGON_CXX_FLAGS)
 CXX_FLAGS += $(AARCH64_CXX_FLAGS)
 CXX_FLAGS += $(X86_CXX_FLAGS)
 CXX_FLAGS += $(OPENCL_CXX_FLAGS)
+CXX_FLAGS += $(ONEAPI_CXX_FLAGS)
 CXX_FLAGS += $(METAL_CXX_FLAGS)
 CXX_FLAGS += $(D3D12_CXX_FLAGS)
 CXX_FLAGS += $(WEBGPU_CXX_FLAGS)
@@ -247,6 +257,7 @@ LLVM_STATIC_LIBFILES = \
 	$(X86_LLVM_CONFIG_LIB) \
 	$(ARM_LLVM_CONFIG_LIB) \
 	$(OPENCL_LLVM_CONFIG_LIB) \
+	$(ONEAPI_LLVM_CONFIG_LIB) \
 	$(METAL_LLVM_CONFIG_LIB) \
 	$(PTX_LLVM_CONFIG_LIB) \
 	$(AARCH64_LLVM_CONFIG_LIB) \
@@ -662,6 +673,7 @@ HEADER_FILES = \
   CodeGen_Targets.h \
   CodeGen_WebGPU_Dev.h \
   CompilerLogger.h \
+  Complex.h \
   ConciseCasts.h \
   CPlusPlusMangle.h \
   ConstantBounds.h \
@@ -796,6 +808,100 @@ HEADER_FILES = \
 
 OBJECTS = $(SOURCE_FILES:%.cpp=$(BUILD_DIR)/%.o)
 HEADERS = $(HEADER_FILES:%.h=$(SRC_DIR)/%.h)
+
+# T2S info
+T2S_DIR  = $(ROOT_DIR)/../t2s
+
+T2S_SOURCE_FILES = \
+  AddressableBuffer.cpp \
+  AutorunKernels.cpp \
+  BuildCallRelation.cpp \
+  ChannelPromotion.cpp \
+  CheckFuncConstraints.cpp \
+  CheckRecursiveCalls.cpp \
+  CodeGen_CM_Dev.cpp \
+  CodeGen_OneAPI_Dev.cpp \
+  CombineChannels.cpp \
+  CmdQueue.cpp \
+  ComputeLoopBounds.cpp \
+  DebugPrint.cpp \
+  Devectorize.cpp \
+  FlattenLoops.cpp \
+  Gather.cpp \
+  IsolateProducers.cpp \
+  IsolateConsumers.cpp \
+  LateFuse.cpp \
+  LoopRemoval.cpp \
+  Math.cpp \
+  MemorySchedule.cpp \
+  MergeUres.cpp \
+  MinimizeShregs.cpp \
+  NoIfSimplify.cpp \
+  Overlay.cpp \
+  PatternMatcher.cpp \
+  Place.cpp \
+  PreprocessBeforeLower.cpp \
+  Relay.cpp \
+  RemoveDeadDimensions.cpp \
+  ScatterAndBuffer.cpp \
+  SliceExprTree.cpp \
+  SpaceTimeTransform.cpp \
+  StandardizeIRForOpenCL.cpp \
+  Stensor.cpp \
+  StructType.cpp \
+  TriangularLoopOptimize.cpp \
+  Utilities.cpp
+
+T2S_HEADER_FILES = \
+  AddressableBuffer.h \
+  AutorunKernels.h \
+  BuildCallRelation.h \
+  ChannelPromotion.h \
+  CheckFuncConstraints.h \
+  CheckRecursiveCalls.h \
+  CodeGen_CM_Dev.h \
+  CodeGen_OneAPI_Dev.h \
+  CombineChannels.h \
+  CmdQueue.h \
+  ComputeLoopBounds.h \
+  DebugPrint.h \
+  Devectorize.h \
+  FlattenLoops.h \
+  Gather.h \
+  LateFuse.h \
+  LoopRemoval.h \
+  Math.h \
+  MemorySchedule.h \
+  MinimizeShregs.h \
+  NoIfSimplify.h \
+  Overlay.h \
+  PatternMatcher.h \
+  Place.h \
+  PreprocessBeforeLower.h \
+  Relay.h \
+  RemoveDeadDimensions.h \
+  ScatterAndBuffer.h \
+  SliceExprTree.h \
+  SpaceTimeTransform.h \
+  StandardizeIRForOpenCL.h \
+  Stensor.h \
+  StructType.h \
+  TriangularLoopOptimize.h \
+  Utilities.h
+
+OBJECTS += $(T2S_SOURCE_FILES:%.cpp=$(BUILD_DIR)/t2s/%.o)
+HEADERS += $(T2S_HEADER_FILES:%.h=$(T2S_DIR)/src/%.h)
+
+$(BUILD_DIR)/t2s/%.o: $(T2S_DIR)/src/%.cpp $(BUILD_DIR)/llvm_ok
+	@-mkdir -p $(BUILD_DIR)/t2s
+	$(CXX) $(CXX_FLAGS) -I$(SRC_DIR) -c $< -o $@ -MMD -MP -MF $(BUILD_DIR)/t2s/$*.d -MT $(BUILD_DIR)/t2s/$*.o
+
+# Add Intel/Altera OpenCL libraries. Used when generating aoc code for FPGA.
+ifneq ($(FPGA_BOARD), )
+#LLVM_STATIC_LIBS +=$(AOCL_LIBS)
+endif
+
+# End of T2S info
 
 RUNTIME_CPP_COMPONENTS = \
   aarch64_cpu_features \
@@ -1077,7 +1183,7 @@ RUNTIME_TRIPLE_WIN_GENERIC_64 = "le64-unknown-windows-unknown"
 #
 # `-fno-rtti` is necessary to allow us to use classes with virtual functions in the runtime code
 RUNTIME_CXX_FLAGS = \
-    -O3 \
+    $(OPTIMIZE_RUNTIME) \
     -std=c++17 \
     -ffreestanding \
     -fno-blocks \
@@ -1096,6 +1202,10 @@ RUNTIME_CXX_FLAGS = \
     -Wno-unused-function \
     -Wvla \
     -Wsign-compare
+
+ifeq ($(OCL_MULTI_CMD_Q), 1)
+	RUNTIME_CXX_FLAGS += -DOCL_MULTI_CMD_Q
+endif
 
 $(BUILD_DIR)/initmod.windows_%_x86_32.ll: $(SRC_DIR)/runtime/windows_%_x86.cpp $(BUILD_DIR)/clang_ok
 	@mkdir -p $(@D)

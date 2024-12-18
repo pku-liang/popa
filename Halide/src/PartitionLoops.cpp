@@ -348,9 +348,10 @@ class FindSimplifications : public IRVisitor {
         condition.accept(this);
 
         bool likely_t = has_uncaptured_likely(true_value);
-        bool likely_f = has_uncaptured_likely(false_value);
+        bool has_false_branch = false_value.defined();
+        bool likely_f = has_false_branch && has_uncaptured_likely(false_value);
 
-        if (!likely_t) {
+        if (!likely_t && has_false_branch) {
             false_value.accept(this);
         }
         if (!likely_f) {
@@ -359,7 +360,9 @@ class FindSimplifications : public IRVisitor {
 
         if (!likely_t && !likely_f) {
             likely_t = has_likely(true_value);
-            likely_f = has_likely(false_value);
+            if (has_false_branch) {
+                likely_f = has_likely(false_value);
+            }
         }
 
         if (likely_t && !likely_f) {
@@ -1038,6 +1041,13 @@ class ExpandSelects : public IRMutator {
         const Call *false_likely = Call::as_intrinsic(op->false_value, {Call::likely});
 
         Expr true_value = mutate(op->true_value);
+        if (!op->false_value.defined()) {
+            if (condition.same_as(op->condition) && true_value.same_as(op->true_value) ) {
+                return op;
+            } else {
+                return Select::make(condition, true_value, op->false_value);
+            }
+        }
         Expr false_value = mutate(op->false_value);
         if (const Or *o = condition.as<Or>()) {
             if (is_trivial(true_value)) {

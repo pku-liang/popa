@@ -6,6 +6,9 @@
 #include "IRMutator.h"
 #include "IROperator.h"
 #include "Simplify.h"
+#include "Substitute.h"
+
+#include "../../t2s/src/Utilities.h"
 
 #include <set>
 
@@ -23,6 +26,30 @@ Expr cse_and_simplify(const Expr &x) {
     return simplify(common_subexpression_elimination(x));
 }
 
+class GlobalBoundsCollector : public IRMutator {
+    using IRMutator::visit;
+public:
+    std::map<std::string, Expr> global_min;
+    std::map<std::string, Expr> global_max;
+private:
+
+    Stmt visit(const For *op) override {
+        Expr min = op->min;
+        Expr extent = op->extent;
+        if (extent.as<IntImm>() == nullptr && !global_max.empty()) {
+            Expr max_substitute = substitute(global_max, extent);
+            Expr min_substitute = substitute(global_min, extent);
+            extent = Max::make(max_substitute, min_substitute);
+            max_substitute = substitute(global_max, min);
+            min_substitute = substitute(global_min, min);
+            min = Min::make(max_substitute, min_substitute);
+        }
+        global_max[extract_last_token(op->name)] = simplify(extent);
+        global_min[extract_last_token(op->name)] = simplify(min);
+        return IRMutator::visit(op);
+    }
+};
+
 // Figure out the region touched of each buffer, and deposit them as
 // let statements outside of each realize node, or at the top level if
 // they're not internal allocations.
@@ -39,9 +66,13 @@ class AllocationInference : public IRMutator {
         internal_assert(iter != env.end());
         Function f = iter->second;
         const vector<string> f_args = f.args();
+        const std::map<std::string, std::pair<Expr, Expr>> &arg_min_extents = f.arg_min_extents();
 
         Scope<Interval> empty_scope;
         Box b = box_touched(op->body, op->name, empty_scope, func_bounds);
+
+        GlobalBoundsCollector collector;
+        collector.mutate(op->body);
 
         Stmt new_body = mutate(op->body);
         Stmt stmt = Realize::make(op->name, op->types, op->memory_type, op->bounds, op->condition, new_body);
@@ -85,6 +116,33 @@ class AllocationInference : public IRMutator {
             } else {
                 max = b[i].max;
                 extent = cse_and_simplify((max - min) + 1);
+            }
+            if (arg_min_extents.find(f_args[i]) != arg_min_extents.end()) {
+                min = arg_min_extents.at(f_args[i]).first;
+            } else if (bound.min.defined()) {
+                min = bound.min;
+            } else {
+                min = b[i].min;
+            }
+            if (arg_min_extents.find(f_args[i]) != arg_min_extents.end()) {
+                extent = arg_min_extents.at(f_args[i]).second;
+                max = simplify(min +extent - 1);
+            } else if (bound.extent.defined()) {
+                extent = bound.extent;
+                max = simplify(min + extent - 1);
+            } else {
+                max = b[i].max;
+                extent = simplify((max - min) + 1);
+            }
+            if (min.as<IntImm>() == nullptr && !collector.global_max.empty()) {
+                Expr max_substitute = substitute(collector.global_max, min);
+                Expr min_substitute = substitute(collector.global_min, min);
+                min = simplify(Min::make(max_substitute, min_substitute));
+            }
+            if (extent.as<IntImm>() == nullptr && !collector.global_max.empty()) {
+                Expr max_substitute = substitute(collector.global_max, extent);
+                Expr min_substitute = substitute(collector.global_min, extent);
+                extent = simplify(Max::make(max_substitute, min_substitute));
             }
             if (bound.modulus.defined()) {
                 if (bound.remainder.defined()) {

@@ -359,6 +359,11 @@ struct Provide : public StmtNode<Provide> {
 
     static Stmt make(const std::string &name, const std::vector<Expr> &values, const std::vector<Expr> &args, const Expr &predicate);
 
+    static Stmt make(const std::string &name, const std::vector<Expr> &values, const std::vector<Expr> &args) {
+        Expr const_true(int lanes = 1);
+        return make(name, values, args, const_true());
+    }
+
     static const IRNodeType _node_type = IRNodeType::Provide;
 };
 
@@ -520,6 +525,7 @@ struct Call : public ExprNode<Call> {
         absd,
         add_image_checks_marker,
         alloca,
+        annotate,
         bitwise_and,
         bitwise_not,
         bitwise_or,
@@ -536,6 +542,13 @@ struct Call : public ExprNode<Call> {
         concat_bits,
         count_leading_zeros,
         count_trailing_zeros,
+
+        // cm-related (to be removed in future)
+        cm_corr_buf_idx,
+        cm_load_2d,
+        cm_prefetch_2d,
+        cm_store_2d,
+
         debug_to_file,
         declare_box_touched,
         div_round_to_zero,
@@ -546,6 +559,10 @@ struct Call : public ExprNode<Call> {
         // of bits determined by the return type.
         extract_bits,
         extract_mask_element,
+
+        // FPGA-related
+        fpga_reg,
+
         get_user_context,
         gpu_thread_barrier,
         halving_add,
@@ -567,11 +584,26 @@ struct Call : public ExprNode<Call> {
         mod_round_to_zero,
         mul_shift_right,
         mux,
+
+        // overlay-related
+        overlay,
+        overlay_switch,
+
         popcount,
+        postincrement,
         prefetch,
         profiling_enable_instance_marker,
         promise_clamped,
         random,
+
+        // FPGA-related
+        read_array,
+        read_channel,
+        read_channel_nb,
+        read_field,
+        read_mem_channel,
+        read_shift_reg,
+
         register_destructor,
         require,
         require_mask,
@@ -615,6 +647,13 @@ struct Call : public ExprNode<Call> {
         undef,
         unreachable,
         unsafe_promise_clamped,
+
+        // FPGA-related
+        write_array,
+        write_channel,
+        write_channel_nb,
+        write_mem_channel,
+        write_shift_reg,
 
         // One-sided variants of widening_add, widening_mul, and widening_sub.
         // arg[0] + widen(arg[1])
@@ -706,9 +745,9 @@ struct Call : public ExprNode<Call> {
      * args themselves are pure. An example of a pure Call node is
      * sqrt. If in doubt, don't mark a Call node as pure. */
     bool is_pure() const {
-        return (call_type == PureExtern ||
+        return ((call_type == PureExtern ||
                 call_type == Image ||
-                call_type == PureIntrinsic);
+                call_type == PureIntrinsic));
     }
 
     bool is_intrinsic() const {
@@ -822,6 +861,14 @@ struct For : public StmtNode<For> {
                      ForType for_type, Partition partition_policy,
                      DeviceAPI device_api,
                      Stmt body);
+
+    static Stmt make(const std::string &name,
+                     Expr min, Expr extent,
+                     ForType for_type,
+                     DeviceAPI device_api,
+                     Stmt body) {
+        return make(name, min, extent, for_type, Partition::Auto, device_api, body);
+    }
 
     bool is_unordered_parallel() const {
         return Halide::Internal::is_unordered_parallel(for_type);

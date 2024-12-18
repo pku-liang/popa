@@ -254,6 +254,15 @@ private:
             }
 
             return Call::make(true_value.type(), Call::select_mask, {cond, true_value, false_value}, Call::PureIntrinsic);
+        } else if (true_value.type().is_vector()) {
+            internal_assert(false_value.type().is_vector());
+            // select_mask requires that all 3 operands have the same
+            // width.
+            unify_bool_vector_types(true_value, false_value);
+            internal_assert(true_value.type().bits() == false_value.type().bits());
+            cond_ty = cond_ty.with_bits(true_value.type().bits());
+            cond = Call::make(cond_ty, Call::cast_mask, {cond}, Call::PureIntrinsic);
+            return Call::make(true_value.type(), Call::select_mask, {cond, true_value, false_value}, Call::PureIntrinsic);
         } else if (!cond.same_as(op->condition) ||
                    !true_value.same_as(op->true_value) ||
                    !false_value.same_as(op->false_value)) {

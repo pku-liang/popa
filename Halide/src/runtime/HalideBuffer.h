@@ -340,7 +340,7 @@ private:
             new_count = --(dev_ref_count->count);
         }
         if (new_count == 0) {
-            if (buf.device) {
+            if (buf.device && buf.device_interface) {
                 assert(!(alloc && device_dirty()) &&
                        "Implicitly freeing a dirty device allocation while a host allocation still lives. "
                        "Call device_free explicitly if you want to drop dirty device-side data. "

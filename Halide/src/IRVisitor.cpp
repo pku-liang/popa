@@ -111,7 +111,9 @@ void IRVisitor::visit(const Not *op) {
 void IRVisitor::visit(const Select *op) {
     op->condition.accept(this);
     op->true_value.accept(this);
-    op->false_value.accept(this);
+    if (op->false_value.defined()) {
+        op->false_value.accept(this);
+    }
 }
 
 void IRVisitor::visit(const Load *op) {
@@ -390,7 +392,9 @@ void IRGraphVisitor::visit(const Not *op) {
 void IRGraphVisitor::visit(const Select *op) {
     include(op->condition);
     include(op->true_value);
-    include(op->false_value);
+    if (op->false_value.defined()) {
+        include(op->false_value);
+    }
 }
 
 void IRGraphVisitor::visit(const Load *op) {
@@ -408,8 +412,13 @@ void IRGraphVisitor::visit(const Broadcast *op) {
 }
 
 void IRGraphVisitor::visit(const Call *op) {
-    for (const auto &arg : op->args) {
-        include(arg);
+    for (size_t i = 0; i < op->args.size(); i++) {
+        // Arg must be defined except if_then_else's else part.
+        if (!op->args[i].defined()){
+            internal_assert((i == 2) && op->is_intrinsic() && op->name == std::string(Call::get_intrinsic_name(Call::if_then_else)));
+        } else {
+            include(op->args[i]);
+        }
     }
 }
 

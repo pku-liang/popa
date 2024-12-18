@@ -309,6 +309,9 @@ struct Expr : public Internal::IRHandle {
     explicit Expr(double x)
         : IRHandle(Internal::FloatImm::make(Float(64), x)) {
     }
+    Expr(complex32_t x)
+        : IRHandle(Internal::UIntImm::make(Complex(32), x.to_bits())) {
+    }
     // @}
 
     /** Make an expression representing a const string (i.e. a StringImm) */
@@ -326,6 +329,11 @@ struct Expr : public Internal::IRHandle {
     HALIDE_ALWAYS_INLINE
     Type type() const {
         return get()->type;
+    }
+
+    void set_type(const Type &t) const {
+        auto tmp = static_cast<const Internal::BaseExprNode*>(ptr);
+        (const_cast<Internal::BaseExprNode*>(tmp))->type = t;
     }
 };
 
@@ -390,6 +398,9 @@ enum class MemoryType {
     /** AMX Tile register for X86. Any data that would be used in an AMX matrix
      * multiplication must first be loaded into an AMX tile register. */
     AMXTile,
+
+    /** Allocate local memory to store mutable global pointer */
+    CLPtr,
 };
 
 namespace Internal {
@@ -408,6 +419,8 @@ enum class ForType {
     Parallel,
     Vectorized,
     Unrolled,
+    PragmaUnrolled,
+    DelayUnroll,
     Extern,
     GPUBlock,
     GPUThread,

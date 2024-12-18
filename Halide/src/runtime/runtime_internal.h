@@ -115,7 +115,7 @@ void *memset(void *s, int val, size_t n);
 // void *fopen(const char *, const char *);
 
 WEAK_INLINE void *halide_fopen(const char *filename, const char *type);
-
+int fprintf(void *stream, const char *format, ...);
 int fileno(void *);
 int fclose(void *);
 int close(int);

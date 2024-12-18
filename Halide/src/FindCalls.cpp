@@ -3,6 +3,7 @@
 #include "ExternFuncArgument.h"
 #include "Function.h"
 #include "IRVisitor.h"
+#include "../../t2s/src/Overlay.h"
 #include <utility>
 
 namespace Halide {
@@ -39,11 +40,24 @@ public:
     }
 };
 
+void find_merge_funcs(FindCalls& calls, const Function& f) {
+    if (f.has_merged_defs()) { 
+        for (auto g : f.definition().schedule().merged_funcs()) {
+            if (calls.calls.find(g.name()) == calls.calls.end()) {
+                g.accept(&calls);
+                calls.calls[g.name()] = g;
+                find_merge_funcs(calls, g);
+            }
+        }
+    } 
+}
+
 void populate_environment_helper(const Function &f,
                                  std::map<std::string, Function> *env,
                                  std::vector<Function> *order,
                                  bool recursive = true,
-                                 bool include_wrappers = false) {
+                                 bool include_wrappers = false,
+                                 bool include_merge_funcs = false) {
     std::map<std::string, Function>::const_iterator iter = env->find(f.name());
     if (iter != env->end()) {
         user_assert(iter->second.same_as(f))
@@ -71,6 +85,10 @@ void populate_environment_helper(const Function &f,
         }
     }
 
+    if (include_merge_funcs) {
+        find_merge_funcs(calls, f);
+    }
+
     if (include_wrappers) {
         for (const auto &it : f.schedule().wrappers()) {
             insert_func(Function{it.second}, &calls.calls, &calls.order);
@@ -85,6 +103,17 @@ void populate_environment_helper(const Function &f,
         insert_func(f, env, order);
         for (const Function &g : calls.order) {
             populate_environment_helper(g, env, order, recursive, include_wrappers);
+        }
+    }
+
+    // find dependent tasks in overlay and add them to env
+    auto &task_funcs = f.overlay().definition().taskItems();
+    auto &task_deps = f.definition().schedule().task_deps();
+    for (auto &kv : task_deps) {
+        auto task = task_funcs[kv.first];
+        // task not in env
+        if (env->find(task.name()) == env->end()) {
+            populate_environment_helper(task, env, order, recursive, include_wrappers);
         }
     }
 }

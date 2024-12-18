@@ -6,6 +6,9 @@
 #include <memory>
 #include <utility>
 
+#include "CodeGen_OpenCL_Dev.h"
+#include "../../t2s/src/CodeGen_OneAPI_Dev.h"
+
 #include "CodeGen_C.h"
 #include "CodeGen_Internal.h"
 #include "CodeGen_PyTorch.h"
@@ -44,6 +47,9 @@ std::map<OutputFileType, const OutputInfo> get_output_info(const Target &target)
         {OutputFileType::hlpipe, {"hlpipe", ".hlpipe", IsSingle}},
         {OutputFileType::llvm_assembly, {"llvm_assembly", ".ll", IsMulti}},
         {OutputFileType::object, {"object", is_windows_coff ? ".obj" : ".o", IsMulti}},
+        {OutputFileType::oneapi, {"c_header", ".sycl.h", IsSingle}},
+        {OutputFileType::host_header, {"host_header", ".h", IsSingle}},
+        {OutputFileType::host_src, {"host_src", ".cpp", IsSingle}},
         {OutputFileType::python_extension, {"python_extension", ".py.cpp", IsSingle}},
         {OutputFileType::pytorch_wrapper, {"pytorch_wrapper", ".pytorch.h", IsSingle}},
         {OutputFileType::registration, {"registration", ".registration.cpp", IsSingle}},
@@ -738,6 +744,39 @@ void Module::compile(const std::map<OutputFileType, std::string> &output_files) 
     if (contains(output_files, OutputFileType::mlir)) {
         debug(1) << "Module.compile(): mlir " << output_files.at(OutputFileType::mlir) << "\n";
         Internal::CodeGen_MLIR cg(target());
+        cg.compile(*this);
+    }
+    if (contains(output_files, OutputFileType::oneapi)) {
+        debug(1) << "Module.compile(): oneapi " << output_files.at(OutputFileType::oneapi) << "\n";
+        auto t = target();
+        t.set_feature(Target::OpenCL, false);
+
+        // CodeGen_OneAPI expects to be compiled with DPC++ i.e. C++17
+        t.set_feature(Target::CPlusPlusMangling, true);
+
+        // We invoke compile() like method using the OneAPI CodeGenerator much like CodeGen_C. We output both host and device source code in a file,
+        // and thus this is different from outputting device source code only as done in Output::cm_devsrc with CodeGen_GPU_Host.
+        std::ofstream file(output_files.at(OutputFileType::oneapi));
+        Internal::CodeGen_OneAPI_Dev cg(t);
+        std::string out_str = cg.compile_oneapi(*this);
+        file << out_str;
+    }
+    if (contains(output_files, OutputFileType::host_header)) {
+        debug(1) << "Module.compile(): host_header " << output_files.at(OutputFileType::host_header) << "\n";
+        std::ofstream file(output_files.at(OutputFileType::host_header));
+        Internal::CodeGen_C cg(file,
+                               target(),
+                               Internal::CodeGen_C::HostHeader,
+                               output_files.at(OutputFileType::host_header));
+        cg.compile(*this);
+    }
+    if (contains(output_files, OutputFileType::host_src)) {
+        debug(1) << "Module.compile(): host_src " << output_files.at(OutputFileType::host_src) << "\n";
+        std::ofstream file(output_files.at(OutputFileType::host_src));
+        Internal::CodeGen_C cg(file,
+                               target(),
+                               Internal::CodeGen_C::HostImplementation,
+                               output_files.at(OutputFileType::host_header));
         cg.compile(*this);
     }
     if (contains(output_files, OutputFileType::python_extension)) {

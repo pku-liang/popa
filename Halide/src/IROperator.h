@@ -219,6 +219,7 @@ struct BufferBuilder {
     Expr host, device, device_interface;
     Type type;
     int dimensions = 0;
+    int channel = 0;
     std::vector<Expr> mins, extents, strides;
     Expr host_dirty, device_dirty;
     Expr build() const;

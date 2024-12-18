@@ -170,6 +170,11 @@ struct Target {
         Semihosting = halide_target_feature_semihosting,
         AVX10_1 = halide_target_feature_avx10_1,
         X86APX = halide_target_feature_x86_apx,
+        IntelFPGA = halide_target_feature_intel_fpga,
+        OneAPI = halide_target_feature_one_api,
+        IntelGPU = halide_target_feature_intel_gpu,
+        EnableSynthesis = halide_target_feature_enable_synthesis,
+        CM = halide_target_feature_cm,
         FeatureEnd = halide_target_feature_end
     };
     Target() = default;
@@ -238,6 +243,7 @@ struct Target {
      * Func::gpu_tile and similar going to work? Currently includes
      * CUDA, OpenCL, Metal and D3D12Compute. */
     bool has_gpu_feature() const;
+    bool has_vectorize_feature() const;
 
     /** Does this target allow using a certain type. Generally all
      * types except 64-bit float and int/uint should be supported by

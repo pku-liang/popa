@@ -44,6 +44,10 @@ public:
      * dimensionality, with the given name */
     ImageParam(Type t, int d, const std::string &n);
 
+    /** Construct an image parameter of the given type and
+     * dimensionality, with the given name */
+    ImageParam(const std::string &n, Type t, int d): ImageParam(t, d, n) {};
+
     /** Bind an Image to this ImageParam. Only relevant for jitting */
     // @{
     void set(const Buffer<> &im);
@@ -133,6 +137,18 @@ public:
 
     /** Add a trace tag to this ImageParam's Func. */
     ImageParam &add_trace_tag(const std::string &trace_tag);
+
+    /** Crop a buffer in blocks of m*m*...(m is the block_size) from the given start to end block index.
+     * The cropping is in-place. */
+    ImageParamOrExpr BCropped(int block_size, std::vector<Expr> start_end);
+
+    template<typename... Args>
+    HALIDE_NO_USER_CODE_INLINE typename std::enable_if<Internal::all_are_convertible<Expr, Args...>::value, ImageParamOrExpr>::type
+    BCropped(int block_size, Args &&... args) {
+        std::vector<Expr> collected_args{std::forward<Args>(args)...};
+        user_assert(collected_args.size() % 2 == 0 && collected_args.size() / 2 == param.dimensions());
+        return BCropped(block_size, collected_args);
+    }
 };
 
 }  // namespace Halide

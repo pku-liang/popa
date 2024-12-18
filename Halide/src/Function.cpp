@@ -4,6 +4,8 @@
 #include <set>
 #include <utility>
 
+#include "../../t2s/src/DebugPrint.h"
+#include "../../t2s/src/Overlay.h"
 #include "CSE.h"
 #include "Func.h"
 #include "Function.h"
@@ -66,6 +68,12 @@ struct FunctionContents {
     std::string name;
     std::string origin_name;
     std::vector<Type> output_types;
+    // This is the the dimensions of the Function during declearation.
+    // But this data structure is only used in Function::define()
+    // to check if it is same with initial definition of the Func (the args)
+    // So, maybe in the future when I complete the test cases for Func declearation,
+    // I can remove this and only use args.
+    std::vector<Expr> decl_args;
 
     /** Optional type constraints on the Function:
      * - If empty, there are no constraints.
@@ -88,6 +96,26 @@ struct FunctionContents {
     // stage of the dims and storage_dims. Used to identify dimensions
     // of the Function by name.
     std::vector<string> args;
+
+    // A map from an arg to its min and extent, as specified by the programmer.
+    // Not necessarily every arg has such info.
+    std::map<string, std::pair<Expr, Expr> > arg_min_extents;
+
+    // Does this function has shift register?
+    bool shift_reg = false;
+
+    // Name of the function from which this function is isolated as a producer.
+    string isolated_from_as_producer;
+
+    // Operands with which this function is isolated as a producer.
+    vector<Expr> isolated_operands_as_producer;
+
+    // Name of the function from which this function is isolated as a consumer.
+    string isolated_from_as_consumer;
+
+    // The minimum depth of the output channel. Meaningful only if this function writes its output to a channel.
+    // This value is 0 by default.
+    int min_depth;
 
     // Function-specific schedule. This schedule is applied to all stages
     // within the function.
@@ -113,6 +141,10 @@ struct FunctionContents {
     bool no_profiling = false;
 
     bool frozen = false;
+
+    Place place = Place::Host;
+
+    Overlay overlay;
 
     void accept(IRVisitor *visitor) const {
         func_schedule.accept(visitor);
@@ -208,11 +240,24 @@ struct CheckVars : public IRGraphVisitor {
     const std::string name;
     bool unbound_reduction_vars_ok = false;
 
+    set<string> var_in_condition;
+
     CheckVars(const std::string &n)
         : name(n) {
     }
 
     using IRVisitor::visit;
+
+    class FindVars : public IRGraphVisitor {
+    public:
+        set<string> vars;
+
+        using IRVisitor::visit;
+
+        void visit(const Variable *var) override {
+            vars.insert(var->name);
+        }
+    };
 
     void visit(const Let *let) override {
         let->value.accept(this);
@@ -222,6 +267,7 @@ struct CheckVars : public IRGraphVisitor {
 
     void visit(const Call *op) override {
         IRGraphVisitor::visit(op);
+        /*
         if (op->name == name && op->call_type == Call::Halide) {
             for (size_t i = 0; i < op->args.size(); i++) {
                 const Variable *var = op->args[i].as<Variable>();
@@ -231,9 +277,9 @@ struct CheckVars : public IRGraphVisitor {
                         << "All of a function's recursive references to itself"
                         << " must contain the same pure variables in the same"
                         << " places as on the left-hand-side.\n";
-                }
+                } 
             }
-        }
+        } */
     }
 
     void visit(const Variable *var) override {
@@ -274,8 +320,45 @@ struct CheckVars : public IRGraphVisitor {
                 }
             }
         }
+       
+        /*
+        if (var_in_condition.find(var->name) == var_in_condition.end())
+            user_error << "Undefined variable \"" << var->name << "\" in definition of Func \"" << name << "\"\n"
+                       << "Suggestion: if variable \"" << var->name << "\" is for reduction, the definition of Func \"" << name
+                       << "\" is expected to have a condition that contains  \"" << var->name << "\", for example, "
+                       << "\"" << var->name << " == " << var->name << "'s maximal value\"\n";
+        */
+    }
 
-        user_error << "Undefined variable \"" << var->name << "\" in definition of Func \"" << name << "\"\n";
+    void visit(const Select *op) override {
+        // Because we allow extended ure.
+        // The condition can have variable 
+        // that is not defined in the arguments of the function.
+        // We record the vars in condition in var_in_condition
+        // and ingore it in the visiting for Variable.
+
+        if (var_in_condition.empty()) { 
+            FindVars find_vars;
+            op->condition.accept(&find_vars);
+            var_in_condition = find_vars.vars;
+        }
+
+        op->true_value.accept(this);
+        if (op->false_value.defined()) {
+            op->false_value.accept(this);
+        }
+    }
+    
+    void visit(const IfThenElse *op) override {
+        // Same reason as the Select node.
+        FindVars find_vars;
+        op->condition.accept(&find_vars);
+        var_in_condition = find_vars.vars;
+
+        op->then_case.accept(this);
+        op->else_case.accept(this);
+
+        var_in_condition.clear();
     }
 };
 
@@ -288,7 +371,7 @@ class FreezeFunctions : public IRGraphVisitor {
     void visit(const Call *op) override {
         IRGraphVisitor::visit(op);
         if (op->call_type == Call::Halide &&
-            op->func.defined() &&
+            op->func->init_def.defined() &&
             op->name != func) {
             Function f(op->func);
             f.freeze();
@@ -490,6 +573,13 @@ ExternFuncArgument deep_copy_extern_func_argument_helper(const ExternFuncArgumen
 
 }  // namespace
 
+bool Function::has_decl_signature() const {
+    // The assert shouldn't appear in this function
+    // internal_assert(contents->decl_args.size() == 0 || contents->output_types.size() > 0)
+    //    << "Function " << contents->name << " has declared arguments but no types.\n";
+    return (contents->decl_args.size() != 0);
+}
+
 void Function::deep_copy(const FunctionPtr &copy, DeepCopyMap &copied_map) const {
     internal_assert(copy.defined())
         << "Cannot deep-copy to undefined Function\n";
@@ -505,7 +595,14 @@ void Function::deep_copy(const FunctionPtr &copy, DeepCopyMap &copied_map) const
     copy->name = contents->name;
     copy->origin_name = contents->origin_name;
     copy->args = contents->args;
+    copy->arg_min_extents = contents->arg_min_extents;
+    copy->shift_reg = contents->shift_reg;
+    copy->isolated_from_as_producer = contents->isolated_from_as_producer;
+    copy->isolated_operands_as_producer = contents->isolated_operands_as_producer;
+    copy->isolated_from_as_consumer = contents->isolated_from_as_consumer;
+    copy->min_depth = contents->min_depth;
     copy->output_types = contents->output_types;
+    copy->decl_args = contents->decl_args;
     copy->debug_file = contents->debug_file;
     copy->extern_function_name = contents->extern_function_name;
     copy->extern_mangling = contents->extern_mangling;
@@ -517,6 +614,8 @@ void Function::deep_copy(const FunctionPtr &copy, DeepCopyMap &copied_map) const
     copy->trace_tags = contents->trace_tags;
     copy->no_profiling = contents->no_profiling;
     copy->frozen = contents->frozen;
+    copy->place = contents->place;
+    copy->overlay = contents->overlay;
     copy->output_buffers = contents->output_buffers;
     copy->func_schedule = contents->func_schedule.deep_copy(copied_map);
 
@@ -629,6 +728,31 @@ void Function::define(const vector<string> &args, vector<Expr> values) {
         init_def_args[i] = Var(args[i]);
     }
 
+    // If the Func was declared with a signature, the declared arguments
+    // should be the same as these for the initial definition of the Func.
+    if (!contents->decl_args.empty()) {
+        user_assert(contents->decl_args.size() == args.size())
+                << "The declaration and the initial definition of Func " << name()
+                << " have different number of arguments.\n";
+        for (size_t i = 0; i < args.size(); i++) {
+            const Variable *var = contents->decl_args[i].as<Variable>();
+            internal_assert(var);
+            user_assert(var->name == args[i])
+                    << "The declaration and the initial definition of Func " << name()
+                    << " have inconsistent argument " << i
+                    << ": " << var->name << " vs. " << args[i] << "\n";
+        }
+        internal_assert(contents->output_types.size() > 0)
+            << "Function " << contents->name << " has declared arguments but no types.\n";
+
+        internal_assert(contents->output_types.size() == values.size())
+            << "Function " << contents->name << " has different declared types with definition.\n";
+        for (size_t i = 0; i < contents->output_types.size(); i++) {
+            internal_assert(contents->output_types[i] == values[i].type())
+                << "Function " << contents->name << " has different declared types with definition.\n";
+        }
+    }
+
     ReductionDomain rdom;
     contents->init_def = Definition(init_def_args, values, rdom, true);
 
@@ -723,7 +847,8 @@ void Function::define_update(const vector<Expr> &_args, vector<Expr> values, con
             err << values[i].type() << ", but pure definition has type " << pure_type;
             user_error << err.str() << "\n";
         }
-        values[i] = common_subexpression_elimination(values[i]);
+        // Move this optimization to Lower, so that isolation may find the original expressions.
+        //values[i] = common_subexpression_elimination(values[i]);
     }
 
     vector<Expr> args(_args.size());
@@ -982,6 +1107,14 @@ const Definition &Function::definition() const {
     return contents->init_def;
 }
 
+std::vector<Expr> &Function::decl_args() {
+    return contents->decl_args;
+}
+
+const std::vector<Expr> &Function::decl_args() const {
+    return contents->decl_args;
+}
+
 const std::vector<std::string> &Function::args() const {
     return contents->args;
 }
@@ -990,12 +1123,32 @@ bool Function::is_pure_arg(const std::string &name) const {
     return std::find(args().begin(), args().end(), name) != args().end();
 }
 
+std::map<std::string, std::pair<Expr, Expr>> &Function::arg_min_extents() {
+    return contents->arg_min_extents;
+}
+
+const std::map<std::string, std::pair<Expr, Expr>> &Function::arg_min_extents() const {
+    return contents->arg_min_extents;
+}
+
+void Function::min_depth(int min_depth) {
+    contents->min_depth = min_depth;
+}
+
+int Function::min_depth() const {
+    return contents->min_depth;
+}
+
 int Function::dimensions() const {
     return (int)args().size();
 }
 
 int Function::outputs() const {
     return (int)output_types().size();
+}
+
+std::vector<Type> &Function::output_types() {
+    return contents->output_types;
 }
 
 const std::vector<Type> &Function::output_types() const {
@@ -1060,6 +1213,48 @@ const Definition &Function::update(int idx) const {
 
 const std::vector<Definition> &Function::updates() const {
     return contents->updates;
+}
+
+bool Function::has_merged_defs() const {
+    return !definition().schedule().merged_ures().empty();
+}
+
+bool Function::has_shift_reg(bool is_set) {
+    if (is_set)
+        contents->shift_reg = true;
+    return contents->shift_reg;
+}
+
+std::vector<std::string> Function::merged_func_names() const {
+    std::vector<std::string> names;
+    for (auto f : definition().schedule().merged_funcs()) {
+        names.push_back(f.name());
+    }
+    return names;
+}
+
+const std::string &Function::isolated_from_as_producer() const {
+    return contents->isolated_from_as_producer;
+}
+
+std::string &Function::isolated_from_as_producer() {
+    return contents->isolated_from_as_producer;
+}
+
+const vector<Expr> &Function::isolated_operands_as_producer() const {
+    return contents->isolated_operands_as_producer;
+}
+
+vector<Expr> &Function::isolated_operands_as_producer() {
+    return contents->isolated_operands_as_producer;
+}
+
+const std::string &Function::isolated_from_as_consumer() const {
+    return contents->isolated_from_as_consumer;
+}
+
+std::string &Function::isolated_from_as_consumer() {
+    return contents->isolated_from_as_consumer;
 }
 
 bool Function::has_pure_definition() const {
@@ -1163,6 +1358,14 @@ const std::vector<std::string> &Function::get_trace_tags() const {
     return contents->trace_tags;
 }
 
+void Function::place(Place place) {
+    contents->place = place;
+}
+
+void Function::overlay(Overlay &overlay) {
+    contents->overlay = overlay;
+}
+
 void Function::lock_loop_levels() {
     auto &schedule = contents->func_schedule;
     schedule.compute_level().lock();
@@ -1198,6 +1401,14 @@ void Function::freeze() {
 }
 bool Function::frozen() const {
     return contents->frozen;
+}
+
+Place Function::place() const {
+    return contents->place;
+}
+
+Overlay &Function::overlay() const {
+    return contents->overlay;
 }
 
 const map<string, FunctionPtr> &Function::wrappers() const {
@@ -1354,6 +1565,49 @@ pair<vector<Function>, map<string, Function>> deep_copy(
     }
 
     return {copy_outputs, copy_env};
+}
+
+std::pair<Expr, Expr> Function::get_bounds(const std::string &name) const {
+    return contents->arg_min_extents[name];
+}
+
+void Function::set_bounds(const std::vector<std::string> &vars, const std::vector<Expr> &mins, const std::vector<Expr> &extents) {
+    internal_assert(vars.size() == mins.size());
+    internal_assert(vars.size() == extents.size());
+    for (size_t i = 0; i < vars.size(); i++) {
+        const std::string &var_name = vars[i];
+        if (contents->arg_min_extents.find(var_name) != contents->arg_min_extents.end()) {
+            debug(4) << "Variable " << var_name << " in function " << this->name() << " has bounds set before. "
+                         << ((isolated_from_as_consumer() == "") ? "" :
+                             "A possible reason may be: if variable " + var_name + " has bounds set in function "
+                             + isolated_from_as_consumer() + ", then when function " + this->name() + " is isolated out of "
+                             + " function " + isolated_from_as_consumer() + ", the bounds are automatically inherited.");
+        }
+        user_assert(std::find(contents->args.begin(), contents->args.end(), var_name) != contents->args.end())
+            << "Variable " << var_name << " is not an argument of function " << this->name() << "\n";
+        contents->arg_min_extents[var_name] = std::pair<Expr, Expr>(mins[i], extents[i]);
+    }
+
+    // Propagate the bounds to the other UREs merged with this func.
+    if (this->has_merged_defs()) {
+        for (auto f : this->definition().schedule().merged_ures()) {
+            Function merged_func = f.function();
+            if (!merged_func.definition().schedule().is_extended_ure()) {
+                merged_func.set_bounds(vars, mins, extents);
+            } else {
+                // The extended URE (i.e. the output Func) might have less dimensions
+                const vector<Dim> &output_dims = merged_func.definition().schedule().dims();
+                for (size_t i = 0; i < vars.size(); i++ ) {
+                    auto var_name = vars[i];
+                    for (auto o : output_dims) {
+                        if (o.var == var_name) {
+                            merged_func.set_bounds({var_name}, {mins[i]}, {extents[i]});
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 }  // namespace Internal

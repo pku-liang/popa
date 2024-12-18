@@ -4,6 +4,8 @@
 #include "IRMutator.h"
 #include "IROperator.h"
 
+#include "../../t2s/src/Utilities.h"
+
 namespace Halide {
 namespace Internal {
 
@@ -72,6 +74,20 @@ void Closure::visit(const Load *op) {
     op->predicate.accept(this);
     op->index.accept(this);
     found_buffer_ref(op->name, op->type, true, false, op->image);
+}
+
+void Closure::visit(const Call *op) {
+    for (size_t i = 0; i < op->args.size(); i++)
+        op->args[i].accept(this);
+
+    if (op->is_intrinsic(Call::cm_load_2d)) {
+        auto name = op->args[0].as<Variable>()->name;
+        found_buffer_ref(name, op->type, true, false, Halide::Buffer<>());
+    }
+    if (op->is_intrinsic(Call::cm_store_2d)) {
+        auto name = remove_postfix(op->args[0].as<Variable>()->name, ".buffer");
+        found_buffer_ref(name, op->type, false, true, Halide::Buffer<>());
+    }
 }
 
 void Closure::visit(const Store *op) {

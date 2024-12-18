@@ -503,7 +503,7 @@ class VectorSubs : public IRMutator {
 
     // Widen an expression to the given number of lanes.
     Expr widen(Expr e, int lanes) {
-        if (e.type().lanes() == lanes) {
+        if (e.type().lanes() >= lanes) {
             return e;
         } else if (lanes % e.type().lanes() == 0) {
             return Broadcast::make(e, lanes / e.type().lanes());
@@ -641,6 +641,9 @@ class VectorSubs : public IRMutator {
     }
 
     Expr visit(const Call *op) override {
+        internal_assert(!op->is_intrinsic(Call::read_channel_nb) && !op->is_intrinsic(Call::write_channel_nb))
+            << "TODO: vectorize read/write_channel_nb";
+
         // Widen the call by changing the lanes of all of its
         // arguments and its return type
 
@@ -652,6 +655,44 @@ class VectorSubs : public IRMutator {
         }
 
         if (!changed) {
+            if (op->is_intrinsic(Call::read_channel) || op->is_intrinsic(Call::write_channel)) {
+                // in vecsub, must vectorize
+                // const StringImm *name_string = op->args[0].as<StringImm>();
+                // user_assert(name_string != nullptr);
+                // std::string name= name_string->value;
+                // auto it = vec_len.find(name);
+                // if (it != vec_len.end() && op->is_intrinsic(Call::read_channel)) {
+                //     max_lanes = std::max(max_lanes, vec_len[name].second);
+                // }
+                // max_lanes = std::max(max_lanes, replacement.type().lanes());
+                // only change the data type
+                // other work is expected to be done in codegen
+                std::string name = new_args[0].as<StringImm>()->value;
+
+                // must has a .channel suffix
+                internal_assert(ends_with(name, ".channel"));
+                name = name.substr(0, (int)name.size() - 8);
+                size_t pos = name.rfind(".");
+                if (pos != std::string::npos) {
+                    size_t suffix_len = name.size() - pos;
+                    std::string suffix = name.substr(pos, suffix_len);
+                    if ((int)suffix.size() > 2 && suffix[1] == 'v') {  // vector type from scatter
+                        int lanes = std::stoi(suffix.substr(2, suffix_len - 2));
+                        max_lanes = std::max(lanes, max_lanes);
+                        name = name.substr(0, pos) + ".channel";
+                        new_args[0] = name;
+                        scatter_vchannels.insert(name);
+                    }
+                }
+                return Call::make(op->type.with_lanes(max_lanes), op->name, new_args,
+                                op->call_type, op->func, op->value_index, op->image, op->param);
+            } else if (op->is_intrinsic(Call::read_mem_channel) || op->is_intrinsic(Call::write_mem_channel)) {
+                return Call::make(op->type.with_lanes(max_lanes), op->name, new_args,
+                                  op->call_type, op->func, op->value_index, op->image, op->param);
+            } else if (op->is_intrinsic(Call::read_shift_reg) || op->is_intrinsic(Call::write_shift_reg)) {
+                return Call::make(op->type.with_lanes(max_lanes), op->name, op->args,
+                                op->call_type, op->func, op->value_index, op->image, op->param);
+            }
             return op;
         } else if (op->name == Call::trace) {
             const int64_t *event = as_const_int(op->args[6]);
@@ -1393,11 +1434,598 @@ class VectorSubs : public IRMutator {
     }
 
 public:
-    VectorSubs(const VectorizedVar &vv) {
+    VectorSubs(const VectorizedVar &vv, std::set<std::string> &_scatter_vchannels)
+        : scatter_vchannels(_scatter_vchannels) {
         vectorized_vars.push_back(vv);
         update_replacements();
     }
+    std::set<std::string> scatter_vchannels;
 };  // namespace
+
+namespace {
+
+class RecordVectorLength : public IRVisitor {
+ public:
+    RecordVectorLength() {}
+    std::map<std::string, std::pair<int, int>> vec_len;
+    std::map<std::string, std::pair<int, int>> vec_shreg_len;
+ private:
+ protected:
+    using IRVisitor::visit;
+
+    void record_channel_lanes(const Call *op) {
+        internal_assert(!op->is_intrinsic(Call::read_channel_nb) && !op->is_intrinsic(Call::write_channel_nb))
+                << "TODO: vectorize read/write_channel_nb";
+
+        int lanes = op->type.lanes();
+        if (op->is_intrinsic(Call::read_channel)) {
+            const StringImm *name_string = op->args[0].as<StringImm>();
+            user_assert(name_string != nullptr);
+            std::string name= name_string->value;
+            if (vec_len.find(name) == vec_len.end()) {
+                vec_len[name] = std::make_pair<int, int>(INT32_MAX, INT32_MAX);
+                vec_len[name].first = lanes;
+            } else {
+                vec_len[name].first = std::min(lanes, vec_len[name].first);
+            }
+        } else if (op->is_intrinsic(Call::write_channel)) {
+            const StringImm *name_string = op->args[0].as<StringImm>();
+            user_assert(name_string != nullptr);
+            std::string name= name_string->value;
+            if (vec_len.find(name) == vec_len.end()) {
+                vec_len[name] = std::make_pair<int, int>(INT32_MAX, INT32_MAX);
+                vec_len[name].second = lanes;
+            } else {
+                vec_len[name].second = std::min(lanes, vec_len[name].second);
+            }
+        } else if (op->is_intrinsic(Call::read_mem_channel)) {
+            const StringImm *name_string = op->args[0].as<StringImm>();
+            user_assert(name_string != nullptr);
+            std::string name= name_string->value;
+            if (vec_len.find(name) == vec_len.end()) {
+                vec_len[name] = std::make_pair<int, int>(INT32_MAX, INT32_MAX);
+                vec_len[name].first = lanes;
+            } else {
+                vec_len[name].first = std::min(lanes, vec_len[name].first);
+            }
+        } else if (op->is_intrinsic(Call::write_mem_channel)) {
+            const StringImm *name_string = op->args[0].as<StringImm>();
+            user_assert(name_string != nullptr);
+            std::string name= name_string->value;
+            if (vec_len.find(name) == vec_len.end()) {
+                vec_len[name] = std::make_pair<int, int>(INT32_MAX, INT32_MAX);
+                vec_len[name].second = lanes;
+            } else {
+                vec_len[name].second = std::min(lanes, vec_len[name].second);
+            }
+        }
+    }
+
+    void record_shreg_lanes(const Call *op) {
+        int lanes = op->type.lanes();
+        if (op->is_intrinsic(Call::read_shift_reg)) {
+            const StringImm *name_string = op->args[0].as<StringImm>();
+            user_assert(name_string != nullptr);
+            std::string name= name_string->value;
+            if (vec_shreg_len.find(name) == vec_shreg_len.end()) {
+                vec_shreg_len[name] = std::make_pair<int, int>(1, 1);
+                vec_shreg_len[name].first = lanes;
+            } else {
+                internal_assert((lanes == vec_shreg_len[name].first) || ((lanes == 1) || (vec_shreg_len[name].first == 1)))
+                    << "Vectorizing shift registers with different vector length: "
+                    << lanes << " vs. " << vec_shreg_len[name].first << ".\n"
+                    << "Only allow the same vectorize length for truly vectorized (lanes>1) shift registers.\n";
+                vec_shreg_len[name].first = std::max(lanes, vec_shreg_len[name].first);
+            }
+        } else if (op->is_intrinsic(Call::write_shift_reg)) {
+            const StringImm *name_string = op->args[0].as<StringImm>();
+            user_assert(name_string != nullptr);
+            std::string name= name_string->value;
+            if (vec_shreg_len.find(name) == vec_shreg_len.end()) {
+                vec_shreg_len[name] = std::make_pair<int, int>(1, 1);
+                vec_shreg_len[name].second = lanes;
+            } else {
+                internal_assert((lanes == vec_shreg_len[name].second) || ((lanes == 1) || (vec_shreg_len[name].second == 1)))
+                    << "Vectorizing shift registers with different vector length: "
+                    << lanes << " vs. " << vec_shreg_len[name].second << ".\n"
+                    << "Only allow the same vectorize length for truly vectorized (lanes>1) shift registers.\n";
+                vec_shreg_len[name].second = std::max(lanes, vec_shreg_len[name].second);
+            }
+        }
+    }
+
+    void visit(const Call *op) override {
+        record_channel_lanes(op);
+        record_shreg_lanes(op);
+        IRVisitor::visit(op);
+    }
+};
+
+class VecDatapath : public IRMutator {
+ public:
+    VecDatapath(std::map<std::string, std::pair<int, int>> &_vec_len,
+        std::map<std::string, std::pair<int, int>> &_vec_shreg_len, std::set<std::string> &_scatter_vchannels):
+        vec_len(_vec_len), vec_shreg_len(_vec_shreg_len), scatter_vchannels(_scatter_vchannels) {}
+ private:
+    std::map<std::string, std::pair<int, int>> &vec_len;
+    std::map<std::string, std::pair<int, int>> &vec_shreg_len;
+    std::set<std::string> &scatter_vchannels;
+ protected:
+    using IRMutator::visit;
+
+    // Return the index to the (only, innermost) vectorized arg of a write/read_channel
+    int channel_vectorized_arg(bool read, const string &channel_name, const vector<Expr> &args) {
+        int vectorized_dim = -1;
+        int num_args = args.size();
+        int begin = 1, end = num_args;
+        if (!read) {
+            begin = 2;
+        }
+        for (int i = begin; i < end; ++i) {
+            if (args[i].as<Ramp>()) {
+                user_assert(vectorized_dim < 0) << "Channel " << channel_name << " has multiple vectorized dimensions\n";
+                vectorized_dim = i;
+            }
+        }
+        user_assert(vectorized_dim == -1 || vectorized_dim == end - 1) << "Channel " << channel_name
+                << " can only be vectorized at the innermost level\n";
+        return vectorized_dim;
+    }
+
+    // Remove vectorized dimension from the args of a write/read_channel
+    std::vector<Expr> channel_args_without_vectorized(bool read, const string &channel_name, const vector<Expr> &args) {
+        int vectorized_dim = channel_vectorized_arg(read, channel_name, args);
+        std::vector<Expr> new_args;
+        for (int j = 0; j < (int)args.size(); ++j) {
+            if (j != vectorized_dim) {
+                new_args.push_back(args[j]);
+            }
+        }
+        return new_args;
+    }
+
+    Expr visit(const Call *op) override {
+        internal_assert(!op->is_intrinsic(Call::read_channel_nb) && !op->is_intrinsic(Call::write_channel_nb))
+                << "TODO: vectorize read/write_channel_nb";
+
+        vector<Expr> raw_new_args(op->args.size());
+
+        // Mutate the args
+        int max_lanes = 0;
+        for (size_t i = 0; i < op->args.size(); i++) {
+            Expr old_arg = op->args[i];
+            Expr new_arg = mutate(old_arg);
+            raw_new_args[i] = new_arg;
+            max_lanes = std::max(new_arg.type().lanes(), max_lanes);
+        }
+        int num_args = raw_new_args.size();
+
+        if (op->is_intrinsic(Call::read_channel) || op->is_intrinsic(Call::write_channel)) {
+            // find the channel
+            const StringImm* name_string = op->args[0].as<StringImm>();
+            user_assert(name_string != nullptr);
+            std::string name = name_string->value;
+            auto it = vec_len.find(name);
+            int read_len = 1, write_len = 1, aim_len = 1;
+            int real_len = op->type.lanes();
+            if (it != vec_len.end()) {  // vectorize
+                read_len = vec_len[name].first;
+                write_len = vec_len[name].second;
+                aim_len = std::min(read_len, write_len);
+                debug(4) << name.c_str() << ", read: " << read_len << ", write: " << write_len << "\n";
+                if (real_len == aim_len) { // read or write channel
+                    std::vector<Expr> new_args = channel_args_without_vectorized(op->is_intrinsic(Call::read_channel), name, raw_new_args);
+                    return Call::make(
+                                op->type.with_lanes(aim_len),
+                                op->name,
+                                new_args,
+                                op->call_type,
+                                op->func,
+                                op->value_index,
+                                op->image,
+                                op->param
+                            );
+                } else if (real_len > aim_len) {  // read must be vectorized
+                    if (real_len % aim_len != 0) {
+                        user_error << "No support for real/aim pair <real:"
+                                   << real_len << ", aim:" << aim_len << "> "
+                                   << "on channel: " << name << "\n";
+                    } else {
+                        // in this case, only need to change read
+                        // according to our assumptions, the aim length must be 1
+                        if (op->is_intrinsic(Call::read_channel)) {
+                            int vectorized_dim = channel_vectorized_arg(true, name, raw_new_args);
+                            int times = real_len / aim_len;
+                            std::vector<Expr> vectors;
+                            // make a series of calls
+                            // TODO: still not sure if it can works
+                            for (int i = 0; i < times; ++i) {
+                                std::vector<Expr> new_args;
+                                std::ostringstream oss;
+                                oss << raw_new_args[0].as<StringImm>()->value << "." << i;
+                                new_args.push_back(StringImm::make(oss.str()));
+                                // skip the first arg
+                                for (int j = 1; j < num_args; ++j) {
+                                    if (j == vectorized_dim) {
+                                        const Ramp *org = raw_new_args[vectorized_dim].as<Ramp>();
+                                        new_args.push_back(
+                                            Cast::make(
+                                                Int(32),
+                                                org->base/aim_len + i
+                                        ));
+                                    } else {
+                                        new_args.push_back(raw_new_args[j]);
+                                    }
+                                }
+                                vectors.push_back(Call::make(
+                                    op->type.with_lanes(aim_len),
+                                    op->name,
+                                    new_args,
+                                    op->call_type,
+                                    op->func,
+                                    op->value_index,
+                                    op->image,
+                                    op->param
+                                ));
+                            }
+                            // codegen for shuffle concat
+                            // printf("make concat\n");
+                            return Shuffle::make_concat(vectors);
+                        } else {  // write_channel
+                            int vectorized_dim = channel_vectorized_arg(false, name, raw_new_args);
+                            int times = real_len / aim_len;
+                            std::vector<Expr> vectors;
+                            // make a series of calls
+                            // TODO: still not sure if it can works
+                            std::string common_var_name = unique_name(
+                                "_common." + raw_new_args[0].as<StringImm>()->value);
+
+                            int common_var_lanes = raw_new_args[1].type().lanes();
+
+                            Expr common_var = Variable::make(
+                                    Int(32).with_lanes(common_var_lanes), common_var_name);
+
+                            for (int i = 0; i < times; ++i) {
+                                std::vector<Expr> new_args;
+                                std::ostringstream oss;
+                                oss << raw_new_args[0].as<StringImm>()->value << "." << i;
+                                new_args.push_back(StringImm::make(oss.str()));
+                                // skip the first arg
+                                // the last value make a slice
+                                // printf("check lanes=%d\n", raw_new_args[1].type().lanes());
+                                new_args.push_back(
+                                    Shuffle::make_slice(common_var, i * aim_len, 1, aim_len)
+                                );
+                                for (int j = 2; j < num_args; ++j) {
+                                    if (j == vectorized_dim) {
+                                        const Ramp *org = raw_new_args[vectorized_dim].as<Ramp>();
+                                        new_args.push_back(
+                                            Cast::make(
+                                                Int(32),
+                                                org->base/aim_len + i
+                                        ));
+                                    } else {
+                                        new_args.push_back(raw_new_args[j]);
+                                    }
+                                }
+                                vectors.push_back(Call::make(
+                                    op->type.with_lanes(aim_len),
+                                    op->name,
+                                    new_args,
+                                    op->call_type,
+                                    op->func,
+                                    op->value_index,
+                                    op->image,
+                                    op->param
+                                ));
+                            }
+                            // codegen for shuffle concat
+                            // printf("make concat\n");
+                            Expr let = Let::make(
+                                common_var_name, raw_new_args[num_args-1], Shuffle::make_concat(vectors));
+                            return let;
+                        }
+                    }
+                } else {    // real_len < aim_len, impossible
+                    user_error << "Impossible case happens, please check internel\n";
+                }
+            }
+        } else if (op->is_intrinsic(Call::read_shift_reg) || op->is_intrinsic(Call::write_shift_reg)) {
+            // find the shreg
+            const StringImm* name_string = op->args[0].as<StringImm>();
+            user_assert(name_string != nullptr);
+            std::string name = name_string->value;
+            auto it = vec_shreg_len.find(name);
+            int read_len = 1, write_len = 1, aim_len = 1;
+            int real_len = op->type.lanes();
+            if (it != vec_shreg_len.end()) {  // vectorize
+                read_len = vec_shreg_len[name].first;
+                write_len = vec_shreg_len[name].second;
+                // for shift registers, use the maximal vector length
+                aim_len = std::max(read_len, write_len);
+
+                // printf("%s, read: %d, write: %d\n", name.c_str(), read_len, write_len);
+                debug(4) << name.c_str() << ", read: " << read_len << ", write: " << write_len << "\n";
+                if (real_len == aim_len) {
+                    // read/write shreg
+                    int split_dim = -1;
+                    int num_args = raw_new_args.size();
+                    int begin = 1, end = num_args;
+                    if (op->is_intrinsic(Call::write_shift_reg)) {
+                        end = num_args - 1;
+                    }
+                    for (int i = begin; i < end; ++i) {
+                        if (raw_new_args[i].as<Ramp>()) {
+                            if (i != 1) {
+                                user_error << "You want to vectorize a space loop which is not inner-most loop"
+                                   << ", which is not supported.\n";
+                            }
+                            if (split_dim >= 0) {
+                                user_error << "Multiple Ramp in one shreg index: "
+                                            << name << "\n";
+                            } else {
+                                split_dim = i;
+                            }
+                        }
+                    }
+                    // eliminate ramp
+                    std::vector<Expr> new_args;
+                    for (int j = 0; j < num_args; ++j) {
+                        if (j != split_dim) {
+                            new_args.push_back(raw_new_args[j]);
+                        }
+                    }
+                    return Call::make(
+                                op->type.with_lanes(aim_len),
+                                op->name,
+                                new_args,
+                                op->call_type,
+                                op->func,
+                                op->value_index,
+                                op->image,
+                                op->param
+                            );
+                } else if (real_len < aim_len) {
+                    if (aim_len % real_len != 0) {
+                        user_error << "No support for real/aim pair <read:"
+                                   << real_len << ", aim:" << aim_len << "> "
+                                   << "on shreg: " << name << "\n";
+                    } else {
+                        // in this case, no need to change read
+                        if (op->is_intrinsic(Call::read_shift_reg)) {
+                            int split_dim = -1;
+                            int num_args = raw_new_args.size();
+                            internal_assert(num_args > 1);
+                            for (int i = 1; i < num_args; ++i) {
+                                if (raw_new_args[i].as<Ramp>()) {
+                                    if (i != 1) {
+                                        user_error << "You want to vectorize a space loop which is not inner-most loop"
+                                        << ", which is not supported.\n";
+                                    }
+                                    if (split_dim >= 0) {
+                                        user_error << "Multiple Ramp in one shreg read index: "
+                                                   << name << "\n";
+                                    } else {
+                                        split_dim = i;
+                                    }
+                                }
+                            }
+                            vector<Expr> new_args;
+                            new_args.push_back(raw_new_args[0]);
+                            for (int i = 2; i < num_args; ++i) {
+                                new_args.push_back(raw_new_args[i]);
+                            }
+                            if (num_args > 1) {
+                                new_args.push_back(raw_new_args[1]);
+                            }
+                            // should not exist a ramp
+                            internal_assert(split_dim < 0) << "Unexpected ramp in read shift register.\n";
+                            return Call::make(
+                                op->type,
+                                op->name,
+                                new_args,
+                                op->call_type,
+                                op->func,
+                                op->value_index,
+                                op->image,
+                                op->param
+                            );
+                        } else {  // for write shreg, just return
+                            int split_dim = -1;
+                            int num_args = raw_new_args.size();
+                            for (int i = 1; i < num_args-1; ++i) {
+                                if (raw_new_args[i].as<Ramp>()) {
+                                    if (i != 1) {
+                                        user_error << "You want to vectorize a space loop which is not inner-most loop"
+                                        << ", which is not supported.\n";
+                                    }
+                                    if (split_dim >= 0) {
+                                        user_error << "Multiple Ramp in one channel write index: "
+                                                   << name << "\n";
+                                    } else {
+                                        split_dim = i;
+                                    }
+                                }
+                            }
+                            vector<Expr> new_args;
+                            new_args.push_back(raw_new_args[0]);
+                            for (int i = 2; i < num_args-1; ++i) {
+                                new_args.push_back(raw_new_args[i]);
+                            }
+                            if (num_args > 2) {
+                                new_args.push_back(raw_new_args[1]);
+                            }
+                            new_args.push_back(raw_new_args[num_args-1]);
+                            // should not exist a ramp
+                            internal_assert(split_dim < 0) << "Unexpected vector write of shift register.\n";
+                            return Call::make(
+                                op->type,
+                                op->name,
+                                new_args,
+                                op->call_type,
+                                op->func,
+                                op->value_index,
+                                op->image,
+                                op->param
+                            );;
+                        }
+                    }
+                } else {
+                    user_error << "Impossible case happens, please check internel\n";
+                }
+            }
+        } else if (op->is_intrinsic(Call::annotate) && op->args[0].as<StringImm>()->value == "Bounds") {
+            std::string name = op->args[1].as<StringImm>()->value + ".shreg";
+            auto itt = vec_shreg_len.find(name);
+            if (itt != vec_shreg_len.end()) {
+                int lanes = std::max(vec_shreg_len[name].first, vec_shreg_len[name].second);
+                std::vector<Expr> args;
+                args.push_back(op->args[0]);
+                args.push_back(op->args[1]);
+                if (lanes == 1) {
+                    args.push_back(op->args[2]);
+                }
+                for (size_t i = 3; i < op->args.size(); ++i) {
+                    args.push_back(op->args[i]);
+                }
+                return Call::make(Int(32), Call::annotate, args, Call::Intrinsic);
+            }
+            return Call::make(
+                op->type,
+                op->name,
+                raw_new_args,
+                op->call_type,
+                op->func,
+                op->value_index,
+                op->image,
+                op->param
+            );
+        }
+        // other cases
+        return Call::make(
+                op->type,
+                op->name,
+                raw_new_args,
+                op->call_type,
+                op->func,
+                op->value_index,
+                op->image,
+                op->param
+            );
+    }
+
+    Stmt visit(const Realize *op) override {
+        auto it = vec_len.find(op->name);
+        if (it != vec_len.end()) {  // vector channel
+            int lanes = std::min(vec_len[op->name].first, vec_len[op->name].second);
+            std::vector<Type> vt;
+            for (auto t: op->types) {
+                vt.push_back(t.with_lanes(lanes));
+            }
+            Region new_bounds;
+            // channel ,the last dim is inner-depth
+            if ((int)op->bounds.size() == 1) {
+                // the only dim is channel-depth
+                for (size_t i = 0; i < op->bounds.size(); ++i) {
+                    new_bounds.push_back(op->bounds[i]);
+                }
+
+            } else if ((int)op->bounds.size() > 1) {
+                for (size_t i = 0; i < op->bounds.size() - 2; ++i) {
+                    new_bounds.push_back(op->bounds[i]);
+                }
+                if (lanes == 1 || (scatter_vchannels.find(op->name) != scatter_vchannels.end())) {
+                    debug(4) << "Don't eliminate dim of channel: " << op->name << "\n";
+                    new_bounds.push_back(op->bounds[op->bounds.size()-2]);
+                }
+                // the last dim is channel depth
+                new_bounds.push_back(op->bounds[op->bounds.size()-1]);
+            }
+            return Realize::make(op->name, vt, op->memory_type, new_bounds, mutate(op->condition), mutate(op->body));
+        }
+        auto itt = vec_shreg_len.find(op->name);
+        if (itt != vec_shreg_len.end()) {  // vector shreg
+            int lanes = std::max(vec_shreg_len[op->name].first, vec_shreg_len[op->name].second);
+
+            std::vector<Type> vt;
+            for (auto t: op->types) {
+                vt.push_back(t.with_lanes(lanes));
+            }
+            Region new_bounds;
+            // shreg ,the first dim is inner-most
+            if (lanes == 1 && op->bounds.size() > 0) {
+                new_bounds.push_back(op->bounds[0]);
+            }
+            for (size_t i = 1; i < op->bounds.size(); ++i) {
+                new_bounds.push_back(op->bounds[i]);
+            }
+            return Realize::make(op->name, vt, op->memory_type, new_bounds, mutate(op->condition), mutate(op->body));
+        }
+        return Realize::make(op->name, op->types, op->memory_type, op->bounds, mutate(op->condition), mutate(op->body));
+    }
+
+    Stmt visit(const Evaluate *op) override {
+        Expr new_val = mutate(op->value);
+        const Shuffle *sop = new_val.as<Shuffle>();
+
+        if (sop != nullptr && sop->is_concat()) {
+            const Call *cop = sop->vectors[0].as<Call>();
+            // disable this part
+            if (false && cop != nullptr && cop->is_intrinsic(Call::write_shift_reg)) {
+                const Shuffle *ssop = cop->args[cop->args.size()-1].as<Shuffle>();
+                if (ssop != nullptr && ssop->is_slice()) {
+                    Expr common_vec = ssop->vectors[0];
+                    std::string common_name = unique_name("common");
+                    Expr common_var = Variable::make(common_vec.type(), common_name);
+
+                    std::vector<Expr> new_sop_vectors;
+                    std::vector<Expr> new_vectors;
+                    new_vectors.push_back(common_var);
+
+                    for (size_t i = 0; i < sop->vectors.size(); ++i) {
+                        const Call *ctmp = sop->vectors[i].as<Call>();
+                        internal_assert(ctmp != nullptr && ctmp->is_intrinsic(Call::write_shift_reg));
+                        std::vector<Expr> tmp_args;
+                        for (size_t j = 0; j < ctmp->args.size() - 1; ++j) {
+                            tmp_args.push_back(ctmp->args[j]);
+                        }
+                        const Shuffle *stmp = ctmp->args[ctmp->args.size()-1].as<Shuffle>();
+                        internal_assert(stmp != nullptr && stmp->is_slice());
+                        internal_assert(stmp->vectors[0].same_as(common_vec));
+                        Expr new_slice = Shuffle::make(new_vectors, stmp->indices);
+                        tmp_args.push_back(new_slice);
+                        new_sop_vectors.push_back(Call::make(
+                                                    ctmp->type,
+                                                    ctmp->name,
+                                                    tmp_args,
+                                                    ctmp->call_type,
+                                                    ctmp->func,
+                                                    ctmp->value_index,
+                                                    ctmp->image,
+                                                    ctmp->param
+                                                ));
+                    }
+                    int num_vec = (int)new_sop_vectors.size();
+                    Stmt ret = Evaluate::make(new_sop_vectors[num_vec-1]);
+                    for (int i = num_vec - 2; i >= 0; --i) {
+                        ret = Block::make(Evaluate::make(new_sop_vectors[i]), ret);
+                    }
+                    ret = LetStmt::make(common_name, common_vec, ret);
+                    return ret;
+                }
+            }
+            int num_vec = (int)sop->vectors.size();
+            Stmt ret = Evaluate::make(sop->vectors[num_vec-1]);
+            for (int i = num_vec - 2; i >= 0; --i) {
+                ret = Block::make(Evaluate::make(sop->vectors[i]), ret);
+            }
+            return ret;
+        }
+        return Evaluate::make(new_val);
+    }
+};
+
+}  // Anonymous namespace
 
 class FindVectorizableExprsInAtomicNode : public IRMutator {
     // An Atomic node protects all accesses to a given buffer. We
@@ -1586,13 +2214,15 @@ class VectorizeLoops : public IRMutator {
             }
 
             VectorizedVar vectorized_var = {for_loop->name, for_loop->min, (int)extent->value};
-            stmt = VectorSubs(vectorized_var).mutate(for_loop->body);
+            stmt = VectorSubs(vectorized_var, scatter_vchannels).mutate(for_loop->body);
         } else {
             stmt = IRMutator::visit(for_loop);
         }
 
         return stmt;
     }
+public:
+    std::set<std::string> scatter_vchannels;
 };
 
 /** Check if all stores in a Stmt are to names in a given scope. Used
@@ -1657,7 +2287,28 @@ Stmt vectorize_statement(const Stmt &stmt) {
 }
 
 }  // namespace
-Stmt vectorize_loops(const Stmt &stmt, const map<string, Function> &env) {
+
+Stmt vectorize_loops(const Stmt &stmt, const Target &tgt, const map<string, Function> &env) {
+    if (tgt.has_feature(Target::Feature::IntelFPGA)) {
+        // initial vectorize
+        VectorizeLoops vecloops;
+        Stmt s = vecloops.mutate(stmt);
+        debug(4) << "After vectorizing loops first phase...\n";
+        debug(4) << s << "\n";
+        debug(4) << "Simplify...\n";
+        s = simplify(s);
+        debug(4) << s << "\n";
+        // vectorize data path
+        RecordVectorLength rvl;
+        // the following vectorization only consider simple cases
+        // for shift registers,
+        // where vectorize length is the same for experssion whose
+        // lanes > 1
+        s.accept(&rvl);
+        debug(4) << "vectorize data path...\n";
+        s = VecDatapath(rvl.vec_len, rvl.vec_shreg_len, vecloops.scatter_vchannels).mutate(s);
+        return s;
+    }
     // Limit the scope of atomic nodes to just the necessary stuff.
     // TODO: Should this be an earlier pass? It's probably a good idea
     // for non-vectorizing stuff too.
