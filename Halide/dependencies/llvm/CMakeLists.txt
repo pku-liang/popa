@@ -187,3 +187,18 @@ if (LLVM_LIBCXX GREATER -1)
     target_link_options(Halide_LanguageOptions INTERFACE
                         $<$<STREQUAL:$<TARGET_PROPERTY:LINKER_LANGUAGE>,CXX>:-stdlib=libc++>)
 endif ()
+
+find_package(MLIR CONFIG HINTS "${LLVM_INSTALL_PREFIX}" "${LLVM_DIR}/../mlir" "${LLVM_DIR}/../lib/cmake/mlir")
+if (MLIR_FOUND)
+    message(STATUS "Found MLIR: ${MLIR_DIR}")
+    target_include_directories(Halide_LLVM INTERFACE "$<BUILD_INTERFACE:${MLIR_INCLUDE_DIRS}>")
+    target_link_libraries(Halide_LLVM INTERFACE
+        MLIRAnalysis
+        MLIRIR
+        MLIRArithDialect
+        MLIRFuncDialect
+        MLIRMemRefDialect
+        MLIRSCFDialect
+        MLIRVectorDialect
+    )
+endif ()

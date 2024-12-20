@@ -1,0 +1,82 @@
+set(T2S_HEADER_FILES
+    AddressableBuffer.h
+    AutorunKernels.h
+    BuildCallRelation.h
+    ChannelPromotion.h
+    CheckFuncConstraints.h
+    CheckRecursiveCalls.h
+    CodeGen_CM_Dev.h
+    CombineChannels.h
+    CmdQueue.h
+    ComputeLoopBounds.h
+    DebugPrint.h
+    Devectorize.h
+    FlattenLoops.h
+    Gather.h
+    LateFuse.h
+    LoopRemoval.h
+    Math.h
+    MemorySchedule.h
+    MinimizeShregs.h
+    NoIfSimplify.h
+    Overlay.h
+    PatternMatcher.h
+    Place.h
+    PreprocessBeforeLower.h
+    Relay.h
+    RemoveDeadDimensions.h
+    ScatterAndBuffer.h
+    SliceExprTree.h
+    SpaceTimeTransform.h
+    StandardizeIRForOpenCL.h
+    Stensor.h
+    StructType.h
+    TriangularLoopOptimize.h
+    Utilities.h
+    PARENT_SCOPE
+)
+
+set(T2S_SOURCE_FILES
+    AddressableBuffer.cpp
+    AutorunKernels.cpp
+    BuildCallRelation.cpp
+    ChannelPromotion.cpp
+    CheckFuncConstraints.cpp
+    CheckRecursiveCalls.cpp
+    CodeGen_CM_Dev.cpp
+    CombineChannels.cpp
+    CmdQueue.cpp
+    ComputeLoopBounds.cpp
+    DebugPrint.cpp
+    Devectorize.cpp
+    FlattenLoops.cpp
+    Gather.cpp
+    IsolateProducers.cpp
+    IsolateConsumers.cpp
+    LateFuse.cpp
+    LoopRemoval.cpp
+    Math.cpp
+    MemorySchedule.cpp
+    MergeUres.cpp
+    MinimizeShregs.cpp
+    NoIfSimplify.cpp
+    Overlay.cpp
+    PatternMatcher.cpp
+    Place.cpp
+    PreprocessBeforeLower.cpp
+    Relay.cpp
+    RemoveDeadDimensions.cpp
+    ScatterAndBuffer.cpp
+    SliceExprTree.cpp
+    SpaceTimeTransform.cpp
+    StandardizeIRForOpenCL.cpp
+    Stensor.cpp
+    StructType.cpp
+    TriangularLoopOptimize.cpp
+    Utilities.cpp
+    PARENT_SCOPE
+)
+
+# By default, T2S will generate OpenCL code for Intel FPGAs, where we need use multiple command queues.
+# To disable multiple command queues, set this variable to 0
+set(OCL_MULTI_CMD_Q ON PARENT_SCOPE)

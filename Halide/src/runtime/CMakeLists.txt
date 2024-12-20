@@ -174,6 +174,10 @@ set(RUNTIME_CXX_FLAGS
     -Wsign-compare
     -Wimplicit-fallthrough
 )
+if (OCL_MULTI_CMD_Q)
+    message(STATUS "Using multiple command queues in OpenCL runtime")
+    list(APPEND RUNTIME_CXX_FLAGS "-DOCL_MULTI_CMD_Q")
+endif()
 
 option(Halide_CLANG_TIDY_BUILD "Generate fake compile jobs for runtime files when running clang-tidy." OFF)
 mark_as_advanced(Halide_CLANG_TIDY_BUILD)

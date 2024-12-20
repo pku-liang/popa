@@ -1452,7 +1452,6 @@ typedef enum halide_target_feature_t {
     halide_target_feature_avx10_1,                ///< Intel AVX10 version 1 support. vector_bits is used to indicate width.
     halide_target_feature_x86_apx,                ///< Intel x86 APX support. Covers initial set of features released as APX: egpr,push2pop2,ppx,ndd .
     halide_target_feature_intel_fpga, ///< Enable Intel FPGAs
-    halide_target_feature_one_api, ///< Enable Intel OneAPI dpcpp program generation
     halide_target_feature_intel_gpu, ///< Enable Intel Graphics
     halide_target_feature_enable_synthesis, ///< Enable synthesizing binaries. Currently used only for Intel FPGAs.
     halide_target_feature_cm, ///< Enable C for metal

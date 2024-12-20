@@ -135,23 +135,12 @@ private:
                 << "Device Func " << op->name << " is expected to have one and only one definition\n";
             Stmt body = mutate(op->body);
             Stmt new_body;
-            if( target.has_feature(Target::OneAPI) && !target.has_feature(Target::IntelGPU)){
-                new_body = For::make(op->name + ".s0.run_on_device",
-                                        0,
-                                        1,
-                                        ForType::Parallel, // The loop type is arbitrarily chosen here: it does not really matter.
-                                        DeviceAPI::OneAPI, 
-                                        body);
-
-            } else {
-                new_body = For::make(op->name + ".s0.run_on_device",
-                                        0,
-                                        1,
-                                        ForType::Parallel, // The loop type is arbitrarily chosen here: it does not really matter.
-                                        DeviceAPI::OpenCL, // TODO: allow other device APIs
-                                        body);
-            }
-
+            new_body = For::make(op->name + ".s0.run_on_device",
+                                    0,
+                                    1,
+                                    ForType::Parallel, // The loop type is arbitrarily chosen here: it does not really matter.
+                                    DeviceAPI::OpenCL, // TODO: allow other device APIs
+                                    body);
             Stmt stmt = ProducerConsumer::make(op->name, op->is_producer, new_body);
             return stmt;
         } else {
@@ -290,7 +279,7 @@ private:
         if ((op->for_type == ForType::Vectorized) && names.size() > 2) {
             enclosing_unrolled_loops.push_back(op->name);
         }
-        if (op->device_api != DeviceAPI::OpenCL && op->device_api != DeviceAPI::OneAPI && (op->min.as<Variable>() || op->extent.as<Variable>())) {
+        if (op->device_api != DeviceAPI::OpenCL && (op->min.as<Variable>() || op->extent.as<Variable>())) {
             //is_set_bounds = false;
         }
         Stmt stmt = IRMutator::visit(op);

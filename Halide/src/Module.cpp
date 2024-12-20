@@ -7,12 +7,12 @@
 #include <utility>
 
 #include "CodeGen_OpenCL_Dev.h"
-#include "../../t2s/src/CodeGen_OneAPI_Dev.h"
-
 #include "CodeGen_C.h"
 #include "CodeGen_Internal.h"
-#include "CodeGen_PyTorch.h"
+#ifdef WITH_MLIR
 #include "CodeGen_MLIR.h"
+#endif
+#include "CodeGen_PyTorch.h"
 #include "CompilerLogger.h"
 #include "Debug.h"
 #include "HexagonOffload.h"
@@ -46,10 +46,8 @@ std::map<OutputFileType, const OutputInfo> get_output_info(const Target &target)
         {OutputFileType::function_info_header, {"function_info_header", ".function_info.h", IsSingle}},
         {OutputFileType::hlpipe, {"hlpipe", ".hlpipe", IsSingle}},
         {OutputFileType::llvm_assembly, {"llvm_assembly", ".ll", IsMulti}},
+        {OutputFileType::mlir, {"mlir", ".mlir", IsSingle}},
         {OutputFileType::object, {"object", is_windows_coff ? ".obj" : ".o", IsMulti}},
-        {OutputFileType::oneapi, {"c_header", ".sycl.h", IsSingle}},
-        {OutputFileType::host_header, {"host_header", ".h", IsSingle}},
-        {OutputFileType::host_src, {"host_src", ".cpp", IsSingle}},
         {OutputFileType::python_extension, {"python_extension", ".py.cpp", IsSingle}},
         {OutputFileType::pytorch_wrapper, {"pytorch_wrapper", ".pytorch.h", IsSingle}},
         {OutputFileType::registration, {"registration", ".registration.cpp", IsSingle}},
@@ -60,7 +58,8 @@ std::map<OutputFileType, const OutputInfo> get_output_info(const Target &target)
         {OutputFileType::stmt_html, {"stmt_html", ".stmt.html", IsMulti}},
         {OutputFileType::conceptual_stmt_html, {"conceptual_stmt_html", ".conceptual.stmt.html", IsMulti}},
         {OutputFileType::device_code, {"device_code", ".device_code", IsMulti}},
-        {OutputFileType::mlir, {"mlir", ".mlir", IsMulti}},
+        {OutputFileType::host_header, {"host_header", ".h", IsSingle}},
+        {OutputFileType::host_src, {"host_src", ".cpp", IsSingle}},
     };
     return ext;
 }
@@ -741,26 +740,6 @@ void Module::compile(const std::map<OutputFileType, std::string> &output_files) 
                                target().has_feature(Target::CPlusPlusMangling) ? Internal::CodeGen_C::CPlusPlusImplementation : Internal::CodeGen_C::CImplementation);
         cg.compile(*this);
     }
-    if (contains(output_files, OutputFileType::mlir)) {
-        debug(1) << "Module.compile(): mlir " << output_files.at(OutputFileType::mlir) << "\n";
-        Internal::CodeGen_MLIR cg(target());
-        cg.compile(*this);
-    }
-    if (contains(output_files, OutputFileType::oneapi)) {
-        debug(1) << "Module.compile(): oneapi " << output_files.at(OutputFileType::oneapi) << "\n";
-        auto t = target();
-        t.set_feature(Target::OpenCL, false);
-
-        // CodeGen_OneAPI expects to be compiled with DPC++ i.e. C++17
-        t.set_feature(Target::CPlusPlusMangling, true);
-
-        // We invoke compile() like method using the OneAPI CodeGenerator much like CodeGen_C. We output both host and device source code in a file,
-        // and thus this is different from outputting device source code only as done in Output::cm_devsrc with CodeGen_GPU_Host.
-        std::ofstream file(output_files.at(OutputFileType::oneapi));
-        Internal::CodeGen_OneAPI_Dev cg(t);
-        std::string out_str = cg.compile_oneapi(*this);
-        file << out_str;
-    }
     if (contains(output_files, OutputFileType::host_header)) {
         debug(1) << "Module.compile(): host_header " << output_files.at(OutputFileType::host_header) << "\n";
         std::ofstream file(output_files.at(OutputFileType::host_header));
@@ -819,6 +798,19 @@ void Module::compile(const std::map<OutputFileType, std::string> &output_files) 
         cg.compile(*this);
         file.close();
         internal_assert(!file.fail());
+    }
+    if (contains(output_files, OutputFileType::mlir)) {
+#ifdef WITH_MLIR
+        debug(1) << "Module.compile(): mlir " << output_files.at(OutputFileType::mlir) << "\n";
+
+        std::ofstream file(output_files.at(OutputFileType::mlir));
+        Internal::CodeGen_MLIR cg(file);
+        cg.compile(*this);
+        file.close();
+        internal_assert(!file.fail());
+#else
+        user_error << "Missing compiled MLIR code generator\n";
+#endif
     }
     if (contains(output_files, OutputFileType::compiler_log)) {
         debug(1) << "Module.compile(): compiler_log " << output_files.at(OutputFileType::compiler_log) << "\n";

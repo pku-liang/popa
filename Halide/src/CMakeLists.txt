@@ -1,6 +1,14 @@
 ##
 # Lists of source files. Keep ALL lists sorted in alphabetical order.
 ##
+file(RELATIVE_PATH RELATIVE_DIR ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
+
+# Check if MLIR is available
+option(TARGET_MLIR "Include MLIR target" ON)
+if (TARGET_MLIR AND DEFINED CACHE{MLIR_DIR})
+    message(STATUS "Compiling Halide with MLIR backend")
+    set(COMPILE_MLIR ON)
+endif()
 
 # The externally-visible header files that go into making Halide.h.
 # Don't include anything here that includes llvm headers.
@@ -175,6 +183,8 @@ set(HEADER_FILES
     WasmExecutor.h
     WrapCalls.h
     )
+list(TRANSFORM T2S_HEADER_FILES PREPEND "${RELATIVE_DIR}/${T2S_DIR}/")
+list(APPEND HEADER_FILES ${T2S_HEADER_FILES})
 
 set(SOURCE_FILES
     AbstractGenerator.cpp
@@ -361,6 +371,11 @@ set(SOURCE_FILES
     WasmExecutor.cpp
     WrapCalls.cpp
     )
+if (COMPILE_MLIR)
+    list(APPEND SOURCE_FILES CodeGen_MLIR.cpp)
+endif()
+list(TRANSFORM T2S_SOURCE_FILES PREPEND "${RELATIVE_DIR}/${T2S_DIR}/")
+list(APPEND SOURCE_FILES ${T2S_SOURCE_FILES})
 
 set(C_TEMPLATE_FILES
     CodeGen_C_prologue
@@ -432,6 +447,7 @@ add_library(Halide
             # Including these as sources works around the need to "install" Halide_initmod
             $<TARGET_OBJECTS:Halide_initmod>
             $<TARGET_OBJECTS:Halide_c_templates>)
+target_include_directories(Halide PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 ##
 # Flatbuffers and Serialization dependencies.
@@ -630,6 +646,9 @@ if (TARGET_WEBGPU)
     target_compile_definitions(Halide PRIVATE WITH_WEBGPU)
 endif()
 
+if (COMPILE_MLIR)
+    target_compile_definitions(Halide PRIVATE WITH_MLIR)
+endif()
 
 ##
 # Add autoschedulers to the build.

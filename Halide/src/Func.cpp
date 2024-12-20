@@ -3847,6 +3847,16 @@ void Func::compile_to_llvm_assembly(const string &filename, const vector<Argumen
     pipeline().compile_to_llvm_assembly(filename, args, "", target);
 }
 
+void Func::compile_to_mlir(const string &filename, const vector<Argument> &args, const string &fn_name,
+                           const Target &target) {
+    pipeline().compile_to_mlir(filename, args, fn_name, target);
+}
+
+void Func::compile_to_mlir(const string &filename, const vector<Argument> &args,
+                           const Target &target) {
+    pipeline().compile_to_mlir(filename, args, "", target);
+}
+
 void Func::compile_to_object(const string &filename, const vector<Argument> &args,
                              const string &fn_name, const Target &target) {
     pipeline().compile_to_object(filename, args, fn_name, target);
@@ -3865,14 +3875,6 @@ void Func::compile_to_header(const string &filename, const vector<Argument> &arg
 void Func::compile_to_c(const string &filename, const vector<Argument> &args,
                         const string &fn_name, const Target &target) {
     pipeline().compile_to_c(filename, args, fn_name, target);
-}
-
-void Func::compile_to_oneapi(const vector<Argument> &args,
-                            const string &fn_name,
-                            const Target &target) {
-    user_assert( target.has_feature(Target::IntelFPGA) || target.has_feature(Target::IntelGPU) ) << " IntelFPGA or IntelGPU Target not found.\n";
-    user_assert( target.has_feature((Target::OneAPI)) ) << " OneAPI Target not found.\n";
-    pipeline().compile_to_oneapi(args, fn_name, target);
 }
 
 void Func::compile_to_cm(const vector<Argument> &args,

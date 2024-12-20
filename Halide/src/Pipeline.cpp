@@ -326,6 +326,14 @@ void Pipeline::compile_to_llvm_assembly(const string &filename,
     m.compile(single_output(filename, m, OutputFileType::llvm_assembly));
 }
 
+void Pipeline::compile_to_mlir(const string &filename,
+                               const vector<Argument> &args,
+                               const string &fn_name,
+                               const Target &target) {
+    Module m = compile_to_module(args, fn_name, target);
+    m.compile(single_output(filename, m, OutputFileType::mlir));
+}
+
 void Pipeline::compile_to_object(const string &filename,
                                  const vector<Argument> &args,
                                  const string &fn_name,
@@ -364,21 +372,6 @@ void Pipeline::compile_to_cm(const vector<Argument> &args,
                              const Target &target) {
     Module m = compile_to_module(args, fn_name, target);
     m.compile(single_output(fn_name, m, OutputFileType::device_code));
-}
-
-void Pipeline::compile_to_oneapi(const vector<Argument> &args,
-                                 const string &fn_name,
-                                 const Target &target) {
-    // check that target has IntelFPGA and OneAPI targets set. Else throw an error
-    user_assert( target.has_feature(Target::IntelFPGA) ) << " IntelFPGA Target not found.\n";
-    user_assert( target.has_feature((Target::OneAPI)) ) << " OneAPI Target not found.\n";
-
-    debug(2) << "OneAPI-compiling for: " << target << "\n";
-    Module m = compile_to_module(args, fn_name, target);
-    if (target.has_feature(Target::IntelFPGA)) {
-        auto ext = get_output_info(target);
-        m.compile(single_output( fn_name + ext.at(OutputFileType::oneapi).extension, m, OutputFileType::oneapi));
-    }
 }
 
 void Pipeline::print_loop_nest() {

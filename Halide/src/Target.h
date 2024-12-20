@@ -171,7 +171,6 @@ struct Target {
         AVX10_1 = halide_target_feature_avx10_1,
         X86APX = halide_target_feature_x86_apx,
         IntelFPGA = halide_target_feature_intel_fpga,
-        OneAPI = halide_target_feature_one_api,
         IntelGPU = halide_target_feature_intel_gpu,
         EnableSynthesis = halide_target_feature_enable_synthesis,
         CM = halide_target_feature_cm,

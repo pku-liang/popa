@@ -130,7 +130,6 @@ WITH_WEBASSEMBLY ?= $(findstring webassembly, $(LLVM_COMPONENTS))
 # AMDGPU target is WIP
 WITH_AMDGPU ?= $(findstring amdgpu, $(LLVM_COMPONENTS))
 WITH_OPENCL ?= not-empty
-WITH_ONEAPI ?= not-empty
 WITH_METAL ?= not-empty
 WITH_D3D12 ?= not-empty
 WITH_VULKAN ?= not-empty
@@ -163,9 +162,6 @@ AMDGPU_LLVM_CONFIG_LIB=$(if $(WITH_AMDGPU), amdgpu, )
 
 OPENCL_CXX_FLAGS=$(if $(WITH_OPENCL), -DWITH_OPENCL, )
 OPENCL_LLVM_CONFIG_LIB=$(if $(WITH_OPENCL), , )
-
-ONEAPI_CXX_FLAGS=$(if $(WITH_ONEAPI), -DWITH_OPENCL, )
-ONEAPI_LLVM_CONFIG_LIB=$(if $(WITH_ONEAPI), , )
 
 METAL_CXX_FLAGS=$(if $(WITH_METAL), -DWITH_METAL, )
 METAL_LLVM_CONFIG_LIB=$(if $(WITH_METAL), , )
@@ -221,7 +217,6 @@ CXX_FLAGS += $(HEXAGON_CXX_FLAGS)
 CXX_FLAGS += $(AARCH64_CXX_FLAGS)
 CXX_FLAGS += $(X86_CXX_FLAGS)
 CXX_FLAGS += $(OPENCL_CXX_FLAGS)
-CXX_FLAGS += $(ONEAPI_CXX_FLAGS)
 CXX_FLAGS += $(METAL_CXX_FLAGS)
 CXX_FLAGS += $(D3D12_CXX_FLAGS)
 CXX_FLAGS += $(WEBGPU_CXX_FLAGS)
@@ -257,7 +252,6 @@ LLVM_STATIC_LIBFILES = \
 	$(X86_LLVM_CONFIG_LIB) \
 	$(ARM_LLVM_CONFIG_LIB) \
 	$(OPENCL_LLVM_CONFIG_LIB) \
-	$(ONEAPI_LLVM_CONFIG_LIB) \
 	$(METAL_LLVM_CONFIG_LIB) \
 	$(PTX_LLVM_CONFIG_LIB) \
 	$(AARCH64_LLVM_CONFIG_LIB) \
@@ -466,7 +460,6 @@ SOURCE_FILES = \
   CodeGen_Hexagon.cpp \
   CodeGen_Internal.cpp \
   CodeGen_LLVM.cpp \
-  CodeGen_MLIR.cpp \
   CodeGen_Metal_Dev.cpp \
   CodeGen_OpenCL_Dev.cpp \
   CodeGen_Vulkan_Dev.cpp \
@@ -663,7 +656,6 @@ HEADER_FILES = \
   CodeGen_GPU_Dev.h \
   CodeGen_Internal.h \
   CodeGen_LLVM.h \
-  CodeGen_MLIR.h \
   CodeGen_Metal_Dev.h \
   CodeGen_OpenCL_Dev.h \
   CodeGen_Vulkan_Dev.h \
@@ -820,7 +812,6 @@ T2S_SOURCE_FILES = \
   CheckFuncConstraints.cpp \
   CheckRecursiveCalls.cpp \
   CodeGen_CM_Dev.cpp \
-  CodeGen_OneAPI_Dev.cpp \
   CombineChannels.cpp \
   CmdQueue.cpp \
   ComputeLoopBounds.cpp \
@@ -860,7 +851,6 @@ T2S_HEADER_FILES = \
   CheckFuncConstraints.h \
   CheckRecursiveCalls.h \
   CodeGen_CM_Dev.h \
-  CodeGen_OneAPI_Dev.h \
   CombineChannels.h \
   CmdQueue.h \
   ComputeLoopBounds.h \

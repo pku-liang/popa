@@ -234,6 +234,12 @@ public:
                                   const std::string &fn_name,
                                   const Target &target = get_target_from_environment());
 
+    /** Emit MLIR code. */
+    void compile_to_mlir(const std::string &filename,
+                         const std::vector<Argument> &args,
+                         const std::string &fn_name,
+                         const Target &target = get_target_from_environment());
+
     /** Statically compile a pipeline with multiple output functions to an
      * object file, with the given filename (which should probably end in
      * .o or .obj), type signature, and C function name (which defaults to
@@ -277,13 +283,6 @@ public:
     void compile_to_cm(const std::vector<Argument> &,
                        const std::string &fn_name,
                        const Target &target = get_target_from_environment());
-
-    /** Statically compile this function to DPCPP source code.
-     * This relies on the original OpenCL device code wrapped in DPCPP/SYCL calls/
-     * To compile this code, one will need to install Intel's OneAPI with DPCPP. */
-    void compile_to_oneapi(const std::vector<Argument> &,
-                           const std::string &fn_name,
-                           const Target &target = get_target_from_environment());
 
     /** Write out an internal representation of lowered code. Useful
      * for analyzing and debugging scheduling. Can emit html or plain
