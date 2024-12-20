@@ -114,7 +114,7 @@ Func::Func(Type return_type, const std::vector<Var> &args, Place place) :
     Func(unique_name('f'), return_type, args, place) { }
 
 Func::Func(Function f, Place place)
-    : func(std::move(f)) {
+    : func(f) {
     func.place(place);
     func.min_depth(f.min_depth());
 }

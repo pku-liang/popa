@@ -115,7 +115,7 @@ struct FunctionContents {
 
     // The minimum depth of the output channel. Meaningful only if this function writes its output to a channel.
     // This value is 0 by default.
-    int min_depth;
+    int min_depth = 0;
 
     // Function-specific schedule. This schedule is applied to all stages
     // within the function.

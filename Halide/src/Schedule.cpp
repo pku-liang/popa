@@ -320,12 +320,12 @@ struct StageScheduleContents {
     StoreParams store_params;
     FetchParams fetch_params;
     std::map<int, std::vector<Expr>> task_deps; // task dependency maps
-    bool is_remove;
-    bool is_param_func;
-    bool is_extended_ure;
-    bool is_merged;
-    bool is_input{false};
-    bool is_output{false};
+    bool is_remove = false;
+    bool is_param_func = false;
+    bool is_extended_ure = false;
+    bool is_merged = false;
+    bool is_input = false;
+    bool is_output = false;
 
     bool touched = false;
     bool allow_race_conditions = false;

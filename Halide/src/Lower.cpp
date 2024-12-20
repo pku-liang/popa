@@ -340,9 +340,9 @@ void lower_impl(const vector<Function> &output_funcs,
     s = lower_safe_promises(s);
     log("Lowering after discarding safe promises:", s);
 
-    // debug(1) << "Dynamically skipping stages...\n";
-    // s = skip_stages(s, outputs, fused_groups, env);
-    // log("Lowering after dynamically skipping stages:", s);
+    debug(1) << "Dynamically skipping stages...\n";
+    s = skip_stages(s, outputs, fused_groups, env);
+    log("Lowering after dynamically skipping stages:", s);
 
     if (!t.features_any_of({ Target::IntelFPGA, Target::IntelGPU })) {
         debug(1) << "Forking asynchronous producers...\n";

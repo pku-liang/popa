@@ -2590,7 +2590,7 @@ $(DISTRIB_DIR)/bin/featurization_to_sample \
 $(DISTRIB_DIR)/bin/get_host_target
 
 .PHONY: distrib
-distrib: $(DISTRIB_DIR)/lib/libHalide.$(SHARED_EXT) autoschedulers
+distrib: $(DISTRIB_DIR)/lib/libHalide.$(SHARED_EXT)
 
 $(DISTRIB_DIR)/halide.tgz: distrib
 	ln -sf $(DISTRIB_DIR) halide

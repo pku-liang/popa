@@ -1650,6 +1650,7 @@ private:
                                             [&pair](const Dim &d) { return var_name_match(d.var, pair.var_name); });
             internal_assert(iter != dims.end());
             start_fuse = std::min(start_fuse, (size_t)(iter - dims.begin()));
+
             // Should ignore the __outermost dummy dimension.
             for (size_t i = (size_t)(iter - dims.begin()); i < dims.size() - 1; ++i) {
                 string var_orig = pair.func_1 + ".s" + std::to_string(pair.stage_1) + "." + dims[i].var;
