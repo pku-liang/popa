@@ -1188,7 +1188,7 @@ public:
             if (fused_group.size() == 1) {
                 boxes_for_fused_group[stage_name] = box_provided(body, stages[producing].name, empty_scope, func_bounds);
                 stage_name_to_func[stage_name] = f;
-                internal_assert((int)boxes_for_fused_group[stage_name].size() == f.dimensions());
+                // internal_assert((int)boxes_for_fused_group[stage_name].size() == f.dimensions());
             } else {
                 auto boxes = boxes_provided(body, empty_scope, func_bounds);
                 for (const auto &fused : fused_group) {

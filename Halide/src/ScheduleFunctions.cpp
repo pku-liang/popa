@@ -2004,7 +2004,7 @@ private:
         // Define the old loop var names as equal to the corresponding parent
         // fused loop var. Bounds inference might refer directly to the original
         // loop vars.
-        producer = add_loop_var_aliases(producer, aliases);
+        // producer = add_loop_var_aliases(producer, aliases);
 
         // Add the producer nodes.
         for (const auto &i : funcs) {

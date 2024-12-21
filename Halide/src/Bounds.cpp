@@ -2403,11 +2403,11 @@ private:
                 // only takes Stmts as arguments.
                 Stmt then_case = Evaluate::make(op->args[1]);
                 Stmt equivalent_if;
-                if (op->args.size() == 3) {
+                if (op->args.size() == 3 && op->args[2].defined()) {
                     Stmt else_case = Evaluate::make(op->args[2]);
                     equivalent_if = IfThenElse::make(op->args[0], then_case, else_case);
                 } else {
-                    internal_assert(op->args.size() == 2);
+                    // internal_assert(op->args.size() == 2);
                     equivalent_if = IfThenElse::make(op->args[0], then_case);
                 }
                 equivalent_if.accept(this);

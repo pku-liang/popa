@@ -794,7 +794,7 @@ Expr absd(Expr a, Expr b);
  * that it always evaluates all arguments. If the first argument is
  * true, then return the second, else return the third. Typically
  * vectorizes cleanly, but benefits from SSE41 or newer on x86. */
-Expr select(Expr condition, Expr true_value, Expr false_value);
+Expr select(Expr condition, Expr true_value, Expr false_value = Expr());
 
 /** A multi-way variant of select similar to a switch statement in C,
  * which can accept multiple conditions and values in pairs. Evaluates

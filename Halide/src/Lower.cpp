@@ -207,11 +207,11 @@ void lower_impl(const vector<Function> &output_funcs,
     debug(1) << "Applying space time transformation...\n";
     std::map<std::string, RegBound > reg_size_map;
     s = apply_space_time_transform(s, env, t, reg_size_map);
-    debug(2) << "Lowering after applying space time transformation:\n" << s << "\n\n";
+    log("Lowering after applying space time transformation:", s);
 
     debug(1) << "Fixing calls' args that correspond to loops marked as removed ...\n";
     s = fix_call_args_for_removed_loops(s, env);
-    debug(2) << "Lowering after fixing calls' args that correspond to loops marked as removed:\n" << s << "\n\n";
+    log("Lowering after fixing calls' args that correspond to loops marked as removed:", s);
 
     if (any_memoized) {
         debug(1) << "Injecting memoization...\n";
@@ -374,7 +374,7 @@ void lower_impl(const vector<Function> &output_funcs,
     if (t.has_feature(Target::IntelGPU)) {
         debug(1) << "Applying memory schedule...\n";
         s = do_memory_schedule(s, env);
-        debug(2) << "Lowering after memory schedule:\n" << s << "\n\n";
+        log("Lowering after memory schedule:\n", s);
     }
 
     debug(1) << "Adding atomic mutex allocation...\n";
@@ -456,22 +456,19 @@ void lower_impl(const vector<Function> &output_funcs,
         }
         s = simplify(remove_lets(s, true, true, true, false, funcs));
     }
-    debug(2) << "Lowering after removing Lets and LetStmts in funcs with buffering or scattering:\n" << s <<"\n\n";
+    log("Lowering after removing Lets and LetStmts in funcs with buffering or scattering:", s);
 
     debug(1) << "Scattering and buffering...\n";
     s = simplify(scatter_buffer(s,env));
-    debug(2) << "Lowering after Scattering and buffering:\n"
-             << s << "\n\n";
+    log("Lowering after Scattering and buffering:", s);
 
     debug(1) << "Inserting addressable buffer...\n";
     s = simplify(insert_addressable_buffer(s, env));
-    debug(2) << "Lowering after Scattering and buffering:\n"
-             << s << "\n\n";
+    log("Lowering after inserting addressable buffer:", s);
 
     debug(1) << "Gathering...\n";
     s = simplify(gather_data(s, env));
-    debug(2) << "Lowering after Gathering:\n"
-             << s << "\n\n";
+    log("Lowering after Gathering:\n", s);
 
     debug(1) << "Bounding constant extent loops...\n";
     s = bound_constant_extent_loops(s);

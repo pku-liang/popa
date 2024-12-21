@@ -1161,8 +1161,8 @@ Stmt apply_space_time_transform(Stmt s,
                                 std::map<std::string, RegBound> &reg_size_map) {
     // Simplify the incoming loop first
     SelectToIfConverter converter;
-    debug(4) << converter.mutate(s);
     s = no_if_simplify(converter.mutate(s), true);
+    debug(4) << s;
 
     if (target.has_feature(Target::IntelGPU)) {
         PreRewriter rewriter(env);

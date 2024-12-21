@@ -1196,7 +1196,7 @@ void IRPrinter::visit(const IfThenElse *op) {
 void IRPrinter::visit(const Evaluate *op) {
     stream << get_indent() << "Evaluate(";
     print_no_parens(op->value);
-    stream << "\n";
+    stream << ")\n";
 }
 
 void IRPrinter::visit(const Shuffle *op) {
