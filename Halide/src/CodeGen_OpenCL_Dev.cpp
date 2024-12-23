@@ -2278,8 +2278,7 @@ void CodeGen_OpenCL_Dev::init_module() {
     // This identifies the program as OpenCL C (as opposed to SPIR).
     src_stream << "/*OpenCL C " << target.to_string() << "*/\n";
 
-    src_stream << "#pragma OPENCL FP_CONTRACT ON\n"
-               << "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n";
+    src_stream << "#pragma OPENCL FP_CONTRACT ON\n";
 
     // Write out the Halide math functions.
     src_stream << "#define float_from_bits(x) as_float(x)\n"
@@ -2320,18 +2319,19 @@ void CodeGen_OpenCL_Dev::init_module() {
                << "inline float2 conjugate_c32(float2 x) {return (float2)(x.s0, -x.s1); }\n"
                << "inline float2 sqrt_c32(float2 x) {return (float2)(sqrt_f32(x.s0), 0.0f); }\n"
                << "inline float2 fast_inverse_c32(float2 x) {return (float2)(fast_inverse_f32(x.s0), 0.0f); }\n"
-               << "inline float2 fast_inverse_sqrt_c32(float2 x) {return (float2)(fast_inverse_sqrt_f32(x.s0), 0.0f); }\n"
-               << "typedef double2 complexd;\n"
-               << "typedef union { double4 t; double2 s[2]; } complexd2;\n"
-               << "typedef union { double8 t; double2 s[4]; } complexd4;\n"
-               << "typedef union { double16 t; double2 s[8]; } complexd8;\n"
-               << "inline double2 conjugate_c64(double2 x) {return (double2)(x.s0, -x.s1); }\n";
-//               << "inline double2 sqrt_c64(double2 x) {return (double2)(sqrt_f64(x.s0), 0.0f); }\n"
-//               << "inline double2 fast_inverse_c64(double2 x) {return (double2)(fast_inverse_f64(x.s0), 0.0f); }\n"
-//               << "inline double2 fast_inverse_sqrt_c64(double2 x) {return (double2)(fast_inverse_sqrt_f64(x.s0), 0.0f); }\n";
+               << "inline float2 fast_inverse_sqrt_c32(float2 x) {return (float2)(fast_inverse_sqrt_f32(x.s0), 0.0f); }\n";
+            //    << "typedef double2 complexd;\n"
+            //    << "typedef union { double4 t; double2 s[2]; } complexd2;\n"
+            //    << "typedef union { double8 t; double2 s[4]; } complexd4;\n"
+            //    << "typedef union { double16 t; double2 s[8]; } complexd8;\n"
+            //    << "inline double2 conjugate_c64(double2 x) {return (double2)(x.s0, -x.s1); }\n";
+            //    << "inline double2 sqrt_c64(double2 x) {return (double2)(sqrt_f64(x.s0), 0.0f); }\n"
+            //    << "inline double2 fast_inverse_c64(double2 x) {return (double2)(fast_inverse_f64(x.s0), 0.0f); }\n"
+            //    << "inline double2 fast_inverse_sqrt_c64(double2 x) {return (double2)(fast_inverse_sqrt_f64(x.s0), 0.0f); }\n";
 
-    // __shared always has address space __local.
-    src_stream << "#define __address_space___shared __local\n";
+    // There does not appear to be a reliable way to safely ignore unused
+    // variables in OpenCL C. See https://github.com/halide/Halide/issues/4918.
+    src_stream << "#define halide_maybe_unused(x)\n";
 
     if (target.has_feature(Target::CLDoubles)) {
         src_stream << "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n"
@@ -3138,8 +3138,7 @@ std::unique_ptr<CodeGen_GPU_Dev> new_CodeGen_OpenCL_Dev(const Target &target) {
 }
 
 Stmt standardize_ir_for_fpga_offloading(const Stmt &s, CodeGen_GPU_Dev *cg) {
-    CodeGen_OpenCL_Dev *opencl_cg = dynamic_cast<CodeGen_OpenCL_Dev*>(cg);
-    internal_assert(opencl_cg);
+    CodeGen_OpenCL_Dev *opencl_cg = static_cast<CodeGen_OpenCL_Dev*>(cg);
     opencl_cg->print_global_data_structures_before_kernel(&s);
     opencl_cg->gather_shift_regs_allocates(&s);
 
