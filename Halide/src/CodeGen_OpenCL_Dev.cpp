@@ -3112,8 +3112,38 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Provide *op){
 
 } // namespace
 
+class RemoveDeviceDeclaration : public IRMutator
+{
+    using IRMutator::visit;
+    bool in_kernel = false;
+
+public:
+    Stmt visit(const Realize *op) override {
+        if (ends_with(op->name, ".channel") && !in_kernel) {
+            return mutate(op->body);
+        }
+        return IRMutator::visit(op);
+    }
+
+    Stmt visit(const For *op) override {
+        if (ends_with(op->name, "run_on_device")) {
+            in_kernel = true;
+        }
+        return IRMutator::visit(op);
+    }
+};
+
 std::unique_ptr<CodeGen_GPU_Dev> new_CodeGen_OpenCL_Dev(const Target &target) {
     return std::make_unique<CodeGen_OpenCL_Dev>(target);
+}
+
+Stmt standardize_ir_for_fpga_offloading(const Stmt &s, CodeGen_GPU_Dev *cg) {
+    CodeGen_OpenCL_Dev *opencl_cg = dynamic_cast<CodeGen_OpenCL_Dev*>(cg);
+    internal_assert(opencl_cg);
+    opencl_cg->print_global_data_structures_before_kernel(&s);
+    opencl_cg->gather_shift_regs_allocates(&s);
+
+    return RemoveDeviceDeclaration().mutate(s);
 }
 
 }  // namespace Internal

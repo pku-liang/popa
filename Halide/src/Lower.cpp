@@ -344,7 +344,7 @@ void lower_impl(const vector<Function> &output_funcs,
     s = skip_stages(s, outputs, fused_groups, env);
     log("Lowering after dynamically skipping stages:", s);
 
-    if (!t.features_any_of({ Target::IntelFPGA, Target::IntelGPU })) {
+    if (!t.has_feature(Target::IntelFPGA)) {
         debug(1) << "Forking asynchronous producers...\n";
         s = fork_async_producers(s, env);
         log("Lowering after forking asynchronous producers:", s);
@@ -670,7 +670,7 @@ void lower_impl(const vector<Function> &output_funcs,
         debug(1) << "Skipping Hexagon offload...\n";
     }
 
-    if (t.has_gpu_feature()) {
+    if (t.has_gpu_feature() || t.has_feature(Target::IntelFPGA)) {
         debug(1) << "Offloading GPU loops...\n";
         s = inject_gpu_offload(s, t);
         debug(2) << "Lowering after splitting off GPU loops:\n"

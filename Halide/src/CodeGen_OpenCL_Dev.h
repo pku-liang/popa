@@ -17,7 +17,10 @@ struct CodeGen_GPU_Dev;
 
 std::unique_ptr<CodeGen_GPU_Dev> new_CodeGen_OpenCL_Dev(const Target &target);
 
+Stmt standardize_ir_for_fpga_offloading(const Stmt &s, CodeGen_GPU_Dev *cg);
+
 }  // namespace Internal
 }  // namespace Halide
 
 #endif
+

@@ -119,7 +119,7 @@ class InjectGpuOffload : public IRMutator {
     using IRMutator::visit;
 
     Stmt visit(const For *loop) override {
-        if (!is_gpu(loop->for_type)) {
+        if (!(is_gpu(loop->for_type) || ends_with(loop->name, ".run_on_device"))) {
             return IRMutator::visit(loop);
         }
 
@@ -280,7 +280,11 @@ public:
             i.second->init_module();
         }
 
-        Stmt result = mutate(s);
+        Stmt result = s;
+        if (target.has_feature(Target::IntelFPGA)) {
+            result = standardize_ir_for_fpga_offloading(result, cgdev[DeviceAPI::OpenCL].get());
+        }
+        result = mutate(result);
 
         for (auto &i : cgdev) {
             string api_unique_name = i.second->api_unique_name();
