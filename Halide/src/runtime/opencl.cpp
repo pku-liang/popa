@@ -424,17 +424,16 @@ cl_int create_opencl_command_queue(void *user_context, cl_context *ctx, cl_comma
         return err;
     }
 
-    // debug(user_context) << "    clCreateCommandQueue ";
-    // *q = clCreateCommandQueue(*ctx, dev, nullptr, &err);
+    debug(user_context) << "    clCreateCommandQueue ";
+    *q = clCreateCommandQueue(*ctx, dev, 0, &err);
 
-    // if (err != CL_SUCCESS) {
-    //     debug(user_context) << get_opencl_error_name(err);
-    //     error(user_context) << "CL: clCreateCommandQueue failed: "
-    //                         << get_opencl_error_name(err);
-    // } else {
-    //     debug(user_context) << *q << "\n";
-    // }
-    err = create_opencl_command_queue(user_context, ctx, q);
+    if (err != CL_SUCCESS) {
+        debug(user_context) << get_opencl_error_name(err);
+        error(user_context) << "CL: clCreateCommandQueue failed: "
+                            << get_opencl_error_name(err);
+    } else {
+        debug(user_context) << *q << "\n";
+    }
     return err;
 }
 

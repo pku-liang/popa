@@ -817,7 +817,7 @@ Realization Pipeline::realize(vector<int32_t> sizes, const Target &target) {
 
 Realization Pipeline::realize(JITUserContext *context,
                               vector<int32_t> sizes,
-                              const Target &target) {
+                              const Target &t) {
     user_assert(defined()) << "Pipeline is undefined\n";
     vector<Buffer<>> bufs;
     for (auto &out : contents->outputs) {
@@ -830,6 +830,10 @@ Realization Pipeline::realize(JITUserContext *context,
     }
     Realization r{std::move(bufs)};
 
+    Target target = t;
+    if (target.has_feature(Target::IntelFPGA)) {
+        target.set_feature(Target::EnableSynthesis);
+    }
     compile_jit(target);
     JITUserContext empty_user_context = {};
     if (!context) {
@@ -1078,11 +1082,10 @@ void Pipeline::realize(JITUserContext *context,
     // user_context is just a pointer to a JITUserContext, which is a
     // member of the JITFuncCallContext which we will declare now:
 
+    // Ensure the module is compiled.
     if (target.has_feature(Target::IntelFPGA)) {
         target.set_feature(Target::EnableSynthesis);
     }
-
-    // Ensure the module is compiled.
     compile_jit(target);
 
     // This has to happen after a runtime has been compiled in compile_jit.
