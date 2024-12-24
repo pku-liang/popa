@@ -9,6 +9,7 @@
 #include "CodeGen_PTX_Dev.h"
 #include "CodeGen_Vulkan_Dev.h"
 #include "CodeGen_WebGPU_Dev.h"
+#include "CodeGen_MLIR_Dev.h"
 #include "ExprUsesVar.h"
 #include "IRMutator.h"
 #include "IROperator.h"
@@ -258,6 +259,11 @@ public:
         if (target.has_feature(Target::OpenCL)) {
             cgdev[DeviceAPI::OpenCL] = new_CodeGen_OpenCL_Dev(device_target);
         }
+#ifdef WITH_MLIR
+        if (target.has_feature(Target::MLIR)) {
+            cgdev[DeviceAPI::MLIR] = new_CodeGen_MLIR_Dev(device_target);
+        }
+#endif
         if (target.has_feature(Target::Metal)) {
             cgdev[DeviceAPI::Metal] = new_CodeGen_Metal_Dev(device_target);
         }

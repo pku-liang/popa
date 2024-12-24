@@ -30,13 +30,6 @@ enum SMemType {
     SRAM,
     REG
 };
-
-enum Starget {
-    IntelGPU,
-    IntelFPGA,
-    None
-};
-
 struct FuncOrStensor;
 
 struct Stensor
@@ -60,13 +53,13 @@ struct Stensor
     Stensor(void)
         : Stensor(unique_name("s"), HOST) {}
 
-    Func stensor_realize_wrapper(Starget t);
+    Func stensor_realize_wrapper(const Target &t);
     Func get_wrapper_func();
-    static void realize(Starget t);
-    void realize(Buffer<> dst, Starget t);
-    void compile_jit(Starget t);
+    static void realize(const Target &t);
+    void realize(Buffer<> dst, const Target &t);
+    void compile_jit(const Target &t);
     void compile_to_host(string file_name, const vector<Argument> &args,
-                         const std::string fn_name, Starget t);
+                         const std::string fn_name, const Target &t);
     Stensor &transpose(void);
     Stensor &scope(Var v);
     Stensor &banks(const std::vector<Var> &banks);

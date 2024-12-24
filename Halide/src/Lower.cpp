@@ -297,7 +297,7 @@ void lower_impl(const vector<Function> &output_funcs,
     s = remove_undef(s);
     log("Lowering after removing code that depends on undef values:", s);
 
-    if (t.has_feature(Target::IntelFPGA)) {
+    if (t.has_fpga_feature()) {
         debug(1) << "Placing device functions...\n";
         s = place_device_functions(s, env, t);
         log("Lowering after placing device functions:", s);
@@ -313,7 +313,7 @@ void lower_impl(const vector<Function> &output_funcs,
     s = no_if_simplify(s, false);
     log("Lowering after simplifying IfThenElse without keeping unit loops:", s);
 
-    if (t.has_feature(Target::IntelFPGA)) {
+    if (t.has_fpga_feature()) {
         debug(1) << "Minimizing shift registers...\n";
         map<string, ShiftRegAlloc> func_to_regalloc;
         s = minimize_shift_registers(s, env, func_to_regalloc);
@@ -344,7 +344,7 @@ void lower_impl(const vector<Function> &output_funcs,
     s = skip_stages(s, outputs, fused_groups, env);
     log("Lowering after dynamically skipping stages:", s);
 
-    if (!t.has_feature(Target::IntelFPGA)) {
+    if (!t.has_fpga_feature()) {
         debug(1) << "Forking asynchronous producers...\n";
         s = fork_async_producers(s, env);
         log("Lowering after forking asynchronous producers:", s);
@@ -395,7 +395,7 @@ void lower_impl(const vector<Function> &output_funcs,
 
     map<string, Place> funcs_using_mem_channels;
     vector<std::pair<string, Expr>> letstmts_backup;
-    if (t.has_feature(Target::IntelFPGA)) {
+    if (t.has_fpga_feature()) {
         debug(1) << "Replacing references with mem channels...\n";
         s = replace_references_with_mem_channels(s, env, funcs_using_mem_channels, letstmts_backup);
         log("Lowering after replacing references with mem channels:", s);
@@ -428,7 +428,7 @@ void lower_impl(const vector<Function> &output_funcs,
     s = simplify_correlated_differences(s);
     log("Lowering after simplifying correlated differences:", s);
 
-    if (t.has_feature(Target::IntelFPGA)) {
+    if (t.has_fpga_feature()) {
         debug(1) << "Devectorize unsuitable loops...\n";
         s = devectorize(s);
         log("Lowering after devectorizing unsuitable loops:\n", s);
@@ -512,7 +512,7 @@ void lower_impl(const vector<Function> &output_funcs,
     s = hoist_loop_invariant_if_statements(s);
     log("Lowering after hoisting loop invariant if statements:", s);
 
-    if (!t.has_feature(Target::IntelFPGA)) {
+    if (!t.has_fpga_feature()) {
         debug(1) << "Injecting early frees...\n";
         s = inject_early_frees(s);
         log("Lowering after injecting early frees:", s);
@@ -531,7 +531,7 @@ void lower_impl(const vector<Function> &output_funcs,
     s = simplify_correlated_differences(s);
     log("Lowering after simplifying correlated differences:", s);
 
-    if (t.has_feature(Target::IntelFPGA)) {
+    if (t.has_fpga_feature()) {
         debug(1) << "Replace memory channel with references...\n";
         s = replace_mem_channels(s, env, letstmts_backup);
         log("Lowering after replacing memory channels:", s);
@@ -560,7 +560,7 @@ void lower_impl(const vector<Function> &output_funcs,
     s = match_patterns(s);
     log("Lowering after matching patterns:", s);
 
-    if (t.has_feature(Target::IntelFPGA)) {
+    if (t.has_fpga_feature()) {
         debug(1) << "Inserting FPGA register calls\n";
         s = insert_fpga_reg(s, env);
         log("Lowering after inserting FPGA register calls:", s);
@@ -613,7 +613,7 @@ void lower_impl(const vector<Function> &output_funcs,
 
     // For overlay, we don't need to flatten task loops.
     char *overlay_num = getenv("HL_OVERLAY_NUM");
-    if (t.has_feature(Target::IntelFPGA) && overlay_num == NULL) {
+    if (t.has_fpga_feature() && overlay_num == NULL) {
         debug(1) << "Flatten the loops...\n";
         s = simplify(flatten_loops(s, env));
         log("Lowering after loop flattening:", s);
@@ -624,7 +624,7 @@ void lower_impl(const vector<Function> &output_funcs,
     log("Lowering after triangular loop optimizing:", s);
 
     if (getenv("DISABLE_AUTORUN") == NULL) {
-        if (t.has_feature(Target::IntelFPGA)) {
+        if (t.has_fpga_feature()) {
             debug(1) << "Making device funcs as autorun ...\n";
             s = autorun_kernels(s, env);
             log("Lowering after making device funcs as autorun:", s);
@@ -670,7 +670,7 @@ void lower_impl(const vector<Function> &output_funcs,
         debug(1) << "Skipping Hexagon offload...\n";
     }
 
-    if (t.has_gpu_feature() || t.has_feature(Target::IntelFPGA)) {
+    if (t.has_gpu_feature() || t.has_fpga_feature()) {
         debug(1) << "Offloading GPU loops...\n";
         s = inject_gpu_offload(s, t);
         debug(2) << "Lowering after splitting off GPU loops:\n"

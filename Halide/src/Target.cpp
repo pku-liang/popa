@@ -707,6 +707,7 @@ const std::map<std::string, Target::Feature> feature_name_map = {
     {"intel_fpga", Target::IntelFPGA},
     {"intel_gpu", Target::IntelGPU},
     {"cm", Target::CM},
+    {"mlir", Target::MLIR},
     {"enable_synthesis", Target::EnableSynthesis}
     // NOTE: When adding features to this map, be sure to update PyEnums.cpp as well.
 };
@@ -1218,6 +1219,11 @@ bool Target::has_gpu_feature() const {
             has_feature(Vulkan) ||
             has_feature(WebGPU) ||
             has_feature(IntelGPU));
+}
+
+bool Target::has_fpga_feature() const {
+    return (has_feature(IntelFPGA) ||
+            has_feature(MLIR));
 }
 
 int Target::get_cuda_capability_lower_bound() const {

@@ -367,13 +367,6 @@ void Pipeline::compile_to_c(const string &filename,
     m.compile(single_output(filename, m, OutputFileType::c_source));
 }
 
-void Pipeline::compile_to_cm(const vector<Argument> &args,
-                             const string &fn_name,
-                             const Target &target) {
-    Module m = compile_to_module(args, fn_name, target);
-    m.compile(single_output(fn_name, m, OutputFileType::device_code));
-}
-
 void Pipeline::print_loop_nest() {
     user_assert(defined()) << "Can't print loop nest of undefined Pipeline.\n";
     debug(0) << Halide::Internal::print_loop_nest(contents->outputs);
@@ -414,6 +407,14 @@ void Pipeline::compile_to_multitarget_object_files(const std::string &filename_p
     };
     auto outputs = object_file_outputs(filename_prefix, targets.back());
     compile_multitarget(generate_function_name(), outputs, targets, suffixes, module_producer);
+}
+
+void Pipeline::compile_to_device(const string &filename,
+                                 const vector<Argument> &args,
+                                 const string &fn_name,
+                                 const Target &target) {
+    Module m = compile_to_module(args, fn_name, target);
+    m.compile(single_output(filename, m, OutputFileType::device_code));
 }
 
 void Pipeline::compile_to_host(const string &filename_prefix,

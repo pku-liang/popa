@@ -1036,13 +1036,6 @@ public:
                       const std::string &fn_name = "",
                       const Target &target = get_target_from_environment());
 
-    /** Generate CM device code for Intel GPU, with the given function
-    * name. Other parameters are set to default or omit. The kernel source code
-    * filename is the same as fn_name */
-    void compile_to_cm(const std::vector<Argument> &,
-                       const std::string &fn_name = "",
-                       const Target &target = get_target_from_environment());
-
     /** Write out an internal representation of lowered code. Useful
      * for analyzing and debugging scheduling. Can emit html or plain
      * text. */
@@ -1056,7 +1049,13 @@ public:
      * doing. */
     void print_loop_nest();
 
-    void compile_to_host(const std::string &filename_prefix, const std::vector<Argument> &args,
+    void compile_to_device(const std::string &filename,
+                           const std::vector<Argument> &args,
+                           const std::string &fn_name = "",
+                           const Target &target = get_target_from_environment());
+
+    void compile_to_host(const std::string &filename_prefix,
+                         const std::vector<Argument> &args,
                          const std::string &fn_name = "",
                          const Target &target = get_target_from_environment());
 

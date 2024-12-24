@@ -129,17 +129,18 @@ private:
     Stmt visit(const ProducerConsumer *op) override {
         Function func;
         if (op->is_producer && function_is_in_environment(op->name, env, func) && func.place() == Place::Device) {
-            user_assert(target.has_feature(Target::IntelFPGA)) << "A device (currently IntelFPGA) is expected for the target when using Place::Device for Func "
+            user_assert(target.has_fpga_feature()) << "An FPGA device is expected for the target when using Place::Device for Func "
                 << op->name << "\n" << "Avoid this error by adding code like this: target.set_feature(Target::IntelFPGA);\n";
             internal_assert(func.definition().defined() && func.updates().size() == 0)
                 << "Device Func " << op->name << " is expected to have one and only one definition\n";
             Stmt body = mutate(op->body);
             Stmt new_body;
+            auto device_api = target.has_feature(Target::MLIR) ? DeviceAPI::MLIR : DeviceAPI::OpenCL;
             new_body = For::make(op->name + ".s0.run_on_device",
                                     0,
                                     1,
                                     ForType::Parallel, // The loop type is arbitrarily chosen here: it does not really matter.
-                                    DeviceAPI::OpenCL, // TODO: allow other device APIs
+                                    device_api,
                                     body);
             Stmt stmt = ProducerConsumer::make(op->name, op->is_producer, new_body);
             return stmt;

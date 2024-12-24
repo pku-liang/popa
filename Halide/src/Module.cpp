@@ -6,12 +6,8 @@
 #include <memory>
 #include <utility>
 
-#include "CodeGen_OpenCL_Dev.h"
 #include "CodeGen_C.h"
 #include "CodeGen_Internal.h"
-#ifdef WITH_MLIR
-#include "CodeGen_MLIR.h"
-#endif
 #include "CodeGen_PyTorch.h"
 #include "CompilerLogger.h"
 #include "Debug.h"
@@ -46,7 +42,6 @@ std::map<OutputFileType, const OutputInfo> get_output_info(const Target &target)
         {OutputFileType::function_info_header, {"function_info_header", ".function_info.h", IsSingle}},
         {OutputFileType::hlpipe, {"hlpipe", ".hlpipe", IsSingle}},
         {OutputFileType::llvm_assembly, {"llvm_assembly", ".ll", IsMulti}},
-        {OutputFileType::mlir, {"mlir", ".mlir", IsSingle}},
         {OutputFileType::object, {"object", is_windows_coff ? ".obj" : ".o", IsMulti}},
         {OutputFileType::python_extension, {"python_extension", ".py.cpp", IsSingle}},
         {OutputFileType::pytorch_wrapper, {"pytorch_wrapper", ".pytorch.h", IsSingle}},
@@ -798,19 +793,6 @@ void Module::compile(const std::map<OutputFileType, std::string> &output_files) 
         cg.compile(*this);
         file.close();
         internal_assert(!file.fail());
-    }
-    if (contains(output_files, OutputFileType::mlir)) {
-#ifdef WITH_MLIR
-        debug(1) << "Module.compile(): mlir " << output_files.at(OutputFileType::mlir) << "\n";
-
-        std::ofstream file(output_files.at(OutputFileType::mlir));
-        Internal::CodeGen_MLIR cg(file);
-        cg.compile(*this);
-        file.close();
-        internal_assert(!file.fail());
-#else
-        user_error << "Missing compiled MLIR code generator\n";
-#endif
     }
     if (contains(output_files, OutputFileType::compiler_log)) {
         debug(1) << "Module.compile(): compiler_log " << output_files.at(OutputFileType::compiler_log) << "\n";

@@ -174,6 +174,7 @@ struct Target {
         IntelGPU = halide_target_feature_intel_gpu,
         EnableSynthesis = halide_target_feature_enable_synthesis,
         CM = halide_target_feature_cm,
+        MLIR = halide_target_feature_mlir,
         FeatureEnd = halide_target_feature_end
     };
     Target() = default;
@@ -243,6 +244,8 @@ struct Target {
      * CUDA, OpenCL, Metal and D3D12Compute. */
     bool has_gpu_feature() const;
     bool has_vectorize_feature() const;
+
+    bool has_fpga_feature() const;
 
     /** Does this target allow using a certain type. Generally all
      * types except 64-bit float and int/uint should be supported by

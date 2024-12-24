@@ -516,7 +516,7 @@ class SpaceTimeTransformer : public IRMutator {
             param_vector = func.definition().schedule().transform_params();
             in_scheduled_stt = param_vector[0].sch_vector_specified;
             need_rewrite = true;
-            if (!in_scheduled_stt && target.has_feature(Target::IntelFPGA)) {
+            if (!in_scheduled_stt && target.has_fpga_feature()) {
                 // offload to minimize_shift_reg phase on FPGAs
                 need_rewrite = false;
             }
@@ -911,9 +911,9 @@ class SpaceTimeTransformer : public IRMutator {
                 // set the loop as Vectorized if the loop is at innermost level after stt and is
                 // marked as Vectorized originally; for all the other cases, set the
                 // loop as Unrolled.
-                ForType for_type = target.has_feature(Target::IntelFPGA) ? ForType::Unrolled : ForType::Serial;
+                ForType for_type = target.has_fpga_feature() ? ForType::Unrolled : ForType::Serial;
                 if (k == 0) {
-                    if (target.has_feature(Target::IntelFPGA) && vectorized_loop_name != "") {\
+                    if (target.has_fpga_feature() && vectorized_loop_name != "") {\
                         debug(4) << "Vectorize loop: " << vectorized_loop_name << "\n";
                         internal_assert(extract_last_token(vectorized_loop_name) == param.dst_vars[k])
                         << "After space time transformation, the vectorized loop "

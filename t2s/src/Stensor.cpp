@@ -16,6 +16,7 @@
 *
 * SPDX-License-Identifier: BSD-2-Clause-Patent
 *******************************************************************************/
+#include "../../Halide/src/Target.h"
 #include "../../Halide/src/Simplify.h"
 #include "../../Halide/src/Substitute.h"
 #include "./DebugPrint.h"
@@ -39,7 +40,7 @@ struct Schain {
     vector<Func> funcs;
 };
 vector<Schain> schains;
-Starget target = None;
+Target target = Target();
 
 Stensor &Stensor::scope(Var v) {
     v_scope = v;
@@ -414,34 +415,8 @@ class RealizeOnFPGA
         c.funcs = producers;
     }
 
-#if 0
-    void generate_output_array(Func out, Func drainer) {
-        // TODO: check non-output-stationary dataflow
-        auto src_vars = fv.ure.function().definition().schedule().transform_params()[0].src_vars;
-        vector<string> pe_array_dims(src_vars.begin(), src_vars.end()-1);
-        auto func_dims = out.function().args();
-
-        for (auto u : pe_array_dims) {
-            for (auto o : func_dims) {
-                if (o == u)
-                    output_array_dims.push_back(Var(o));
-            }
-        }
-        drainer.space_time_transform(output_array_dims);
-        debug(1) << "T2X emits: " << drainer.name() << ".space_time_transform("
-                 << names_to_string(output_array_dims) << ");\n";
-    }
-#endif
-
     void isolate_consumer(Schain &c) {
         vector<Func> consumers;
-        // If the host stensor is not specified, we automatically generate it
-        // if (c.stensors.back().position == DRAM) {
-        //     string host_name = c.outf.name() + "_deserializer";
-        //     Stensor s_host(host_name);
-        //     s_host.schain_idx = c.stensors[0].schain_idx;
-        //     c.stensors.push_back(s_host);
-        // }
 
         // Isolate subsequent consumers
         for (auto &s : c.stensors) {
@@ -964,7 +939,7 @@ Stensor &operator>>(Stensor &s, const FIFO &fifo) {
     return s;
 }
 
-void Stensor::realize(Starget t) {
+void Stensor::realize(const Target &t) {
     map<string, Func> env;
     user_assert(schains.back().is_output)
         << "Please specify an output path as the last stensor chain\n";
@@ -973,7 +948,7 @@ void Stensor::realize(Starget t) {
     env = outf.pipeline().compute_environment();
 
     Func f;
-    if (t == Starget::IntelFPGA) {
+    if (t.has_fpga_feature()) {
         FindVars fv(env);
         FindProducerForOutput fpo(env);
         RealizeOnFPGA fpga(fv, fpo);
@@ -994,28 +969,33 @@ void Stensor::realize(Starget t) {
 }
 
 Func Stensor::get_wrapper_func() {
-    user_assert(target != None)
+    user_assert(target.has_gpu_feature() || target.has_fpga_feature())
         << "Please apply Stensor::realize(target) before getting its wrapper function.\n";
     int c = this->schain_idx;
     auto &sc = schains[c];
     for (size_t i = 0; i < sc.stensors.size(); ++i) {
         if (sc.stensors[i].name == this->name) {
-            if (target == IntelGPU) return sc.outf;
-            return sc.funcs[i];
+            if (target.has_gpu_feature()) {
+                return sc.outf;
+            } else {
+                internal_assert(target.has_fpga_feature());
+                return sc.funcs[i];
+            }
         }
     }
     return Func();
 }
 
-Func Stensor::stensor_realize_wrapper(Starget t) {
+Func Stensor::stensor_realize_wrapper(const Target &t) {
     Func f;
     realize(t);
     for (auto &sc : schains) {
         if (sc.is_output) {
             internal_assert(!f.defined());
-            if (t == IntelFPGA) {
+            if (t.has_fpga_feature()) {
                 f = sc.funcs.back();
             } else {
+                internal_assert(t.has_fpga_feature());
                 f = sc.outf;
             }
             internal_assert(f.function().place() == Place::Host);
@@ -1024,45 +1004,20 @@ Func Stensor::stensor_realize_wrapper(Starget t) {
     return f;
 }
 
-void Stensor::realize(Buffer<> dst, Starget t) {
+void Stensor::realize(Buffer<> dst, const Target &t) {
     Func f = stensor_realize_wrapper(t);
-    if (t == Starget::IntelFPGA) {
-        Target acc = get_host_target();
-        acc.set_feature(Target::IntelFPGA);
-        acc.set_feature(Target::EnableSynthesis);
-        f.realize(dst, acc);
-    }
-    if (t == Starget::IntelGPU) {
-        user_error << "Currently the GPU runtime is under developement\n";
-    }
+    f.realize(dst, t);
 }
 
-void Stensor::compile_jit(Starget t) {
+void Stensor::compile_jit(const Target &t) {
     Func f = stensor_realize_wrapper(t);
-    if (t == Starget::IntelFPGA) {
-        Target acc = get_host_target();
-        acc.set_feature(Target::IntelFPGA);
-        acc.set_feature(Target::EnableSynthesis);
-        f.compile_jit(acc);
-    }
+    f.compile_jit(t);
 }
 
 void Stensor::compile_to_host(string file_name, const vector<Argument> &args,
-                              const std::string fn_name, Starget t) {
+                              const std::string fn_name, const Target &t) {
     Func f = stensor_realize_wrapper(t);
-    if (t == Starget::IntelFPGA) {
-        Target acc = get_host_target();
-        acc.set_feature(Target::IntelFPGA);
-        acc.set_feature(Target::EnableSynthesis);
-        f.compile_to_host(file_name, args, fn_name, acc);
-    }
-    if (t == Starget::IntelGPU) {
-        user_warning << "Currently the GPU runtime is under developement, "
-                        "so we just emit out the source code in " << fn_name << "_genx.cpp\n";
-        Target acc = get_host_target();
-        acc.set_feature(Target::IntelGPU);
-        f.compile_to_cm(std::move(args), fn_name, acc);
-    }
+    f.compile_to_host(file_name, args, fn_name, t);
 }
 
 }

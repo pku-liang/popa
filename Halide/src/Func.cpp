@@ -3877,14 +3877,6 @@ void Func::compile_to_c(const string &filename, const vector<Argument> &args,
     pipeline().compile_to_c(filename, args, fn_name, target);
 }
 
-void Func::compile_to_cm(const vector<Argument> &args,
-                        const string &fn_name,
-                        const Target &target) {
-    user_assert(target.has_feature(Target::IntelGPU))
-        << "Please make sure your target has IntelGPU feature";
-    pipeline().compile_to_cm(args, fn_name, target);
-}
-
 void Func::compile_to_lowered_stmt(const string &filename,
                                    const vector<Argument> &args,
                                    StmtOutputFormat fmt,
@@ -3894,6 +3886,11 @@ void Func::compile_to_lowered_stmt(const string &filename,
 
 void Func::print_loop_nest() {
     pipeline().print_loop_nest();
+}
+
+void Func::compile_to_device(const string &filename, const vector<Argument> &args,
+                             const string &fn_name, const Target &target) {
+    pipeline().compile_to_device(filename, args, fn_name, target);
 }
 
 void Func::compile_to_host(const string &filename_prefix, const vector<Argument> &args,

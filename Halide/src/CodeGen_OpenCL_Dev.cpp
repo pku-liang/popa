@@ -1,7 +1,9 @@
 #include <algorithm>
-#include <sstream>
 #include <fstream>
+#include <sstream>
 
+#include "../../t2s/src/DebugPrint.h"
+#include "../../t2s/src/Utilities.h"
 #include "CSE.h"
 #include "CanonicalizeGPUVars.h"
 #include "CodeGen_GPU_Dev.h"
@@ -16,8 +18,6 @@
 #include "IROperator.h"
 #include "Simplify.h"
 #include "Substitute.h"
-#include "../../t2s/src/DebugPrint.h"
-#include "../../t2s/src/Utilities.h"
 
 namespace Halide {
 namespace Internal {
@@ -31,7 +31,7 @@ namespace {
 
 class CodeGen_OpenCL_Dev : public CodeGen_GPU_Dev {
 public:
-    CodeGen_OpenCL_Dev(Target target);
+    CodeGen_OpenCL_Dev(const Target &target);
 
     /** Compile a GPU kernel into the module. This may be called many times
      * with different kernels, which will all be accumulated into a single
@@ -66,7 +66,6 @@ public:
         return "opencl";
     }
 
-
 protected:
     class CodeGen_OpenCL_C : public CodeGen_C {
     public:
@@ -92,8 +91,10 @@ protected:
         // This class does not really mutate the IR.
         class DefineVectorStructTypes : public IRMutator {
             using IRMutator::visit;
+
         private:
-            CodeGen_OpenCL_C* parent;
+            CodeGen_OpenCL_C *parent;
+
         public:
             // Definitions of non-standard vector types.
             std::string vectors;
@@ -101,7 +102,9 @@ protected:
             // Definitions of the struct types.
             std::string structs;
 
-            DefineVectorStructTypes(CodeGen_OpenCL_C* parent) : parent(parent) {}
+            DefineVectorStructTypes(CodeGen_OpenCL_C *parent)
+                : parent(parent) {
+            }
             Expr mutate(const Expr &expr) override;
             Stmt mutate(const Stmt &stmt) override;
         };
@@ -112,13 +115,17 @@ protected:
         // This class does not really mutate the IR.
         class DefineArrayTypes : public IRMutator {
             using IRMutator::visit;
+
         private:
-            CodeGen_OpenCL_C* parent;
+            CodeGen_OpenCL_C *parent;
+
         public:
             // Definitions of arrays.
             std::string arrays;
 
-            DefineArrayTypes(CodeGen_OpenCL_C* parent) : parent(parent) {}
+            DefineArrayTypes(CodeGen_OpenCL_C *parent)
+                : parent(parent) {
+            }
             Expr mutate(const Expr &expr) override;
             Stmt mutate(const Stmt &stmt) override;
         };
@@ -130,37 +137,47 @@ protected:
         // For declaring channels
         class DeclareChannels : public IRVisitor {
             using IRVisitor::visit;
+
         private:
-            CodeGen_OpenCL_C* parent;
+            CodeGen_OpenCL_C *parent;
+
         public:
             std::string channels;
-            DeclareChannels(CodeGen_OpenCL_C* parent) : parent(parent) {}
+            DeclareChannels(CodeGen_OpenCL_C *parent)
+                : parent(parent) {
+            }
             void visit(const Realize *op) override;
         };
 
         // For declaring temporary array variable
         class DeclareArrays : public IRVisitor {
             using IRVisitor::visit;
-            CodeGen_OpenCL_C* parent;
+            CodeGen_OpenCL_C *parent;
             std::set<std::string> array_set;
+
         public:
             std::ostringstream arrays;
-            DeclareArrays(CodeGen_OpenCL_C* parent) : parent(parent) {}
+            DeclareArrays(CodeGen_OpenCL_C *parent)
+                : parent(parent) {
+            }
             void visit(const Call *op) override;
         };
 
         // For unrolling loop with different strategies
         class CheckConditionalChannelAccess : public IRVisitor {
             using IRVisitor::visit;
+
         private:
-            CodeGen_OpenCL_C* parent;
+            CodeGen_OpenCL_C *parent;
             std::string current_loop_name;
+
         public:
-            bool in_if_then_else;       // The current IR is in a branch
-            bool conditional_access;    // There is a conditional execution of channel read/write inside the current loop
-            bool irregular_loop_dep;    // There is a irregular loop inside the current loop and the irregular bound
-                                        // depends on current loop var
-            CheckConditionalChannelAccess(CodeGen_OpenCL_C* parent, std::string current_loop_name) : parent(parent), current_loop_name(current_loop_name) {
+            bool in_if_then_else;     // The current IR is in a branch
+            bool conditional_access;  // There is a conditional execution of channel read/write inside the current loop
+            bool irregular_loop_dep;  // There is a irregular loop inside the current loop and the irregular bound
+                                      // depends on current loop var
+            CheckConditionalChannelAccess(CodeGen_OpenCL_C *parent, std::string current_loop_name)
+                : parent(parent), current_loop_name(current_loop_name) {
                 in_if_then_else = false;
                 conditional_access = false;
                 irregular_loop_dep = false;
@@ -173,25 +190,28 @@ protected:
         // For allocating shift registers
         class GatherShiftRegsAllocates : public IRVisitor {
             using IRVisitor::visit;
+
         private:
-            CodeGen_OpenCL_C* parent;
-            std::map<std::string, std::vector<std::string>> &shift_regs_allocates; // For all shift regs
-            std::map<std::string, size_t> &shift_regs_bounds; // Only for shift regs whose types are nonstandard_vectors
-            std::map<std::string, size_t> &temp_regs_bounds; // Only for temp regs whose types are nonstandard_vectors
+            CodeGen_OpenCL_C *parent;
+            std::map<std::string, std::vector<std::string>> &shift_regs_allocates;  // For all shift regs
+            std::map<std::string, size_t> &shift_regs_bounds;                       // Only for shift regs whose types are nonstandard_vectors
+            std::map<std::string, size_t> &temp_regs_bounds;                        // Only for temp regs whose types are nonstandard_vectors
             std::map<std::string, std::vector<Expr>> &space_vars;
+
         public:
-            GatherShiftRegsAllocates(CodeGen_OpenCL_C* parent, std::map<std::string, std::vector<std::string>> &shift_regs_allocates,
-                std::map<std::string, size_t> &shift_regs_bounds, std::map<std::string, size_t> &temp_regs_bounds,
-                std::map<std::string, std::vector<Expr>> &space_vars) :
-                    parent(parent), shift_regs_allocates(shift_regs_allocates), shift_regs_bounds(shift_regs_bounds), temp_regs_bounds(temp_regs_bounds), space_vars(space_vars) {}
+            GatherShiftRegsAllocates(CodeGen_OpenCL_C *parent, std::map<std::string, std::vector<std::string>> &shift_regs_allocates,
+                                     std::map<std::string, size_t> &shift_regs_bounds, std::map<std::string, size_t> &temp_regs_bounds,
+                                     std::map<std::string, std::vector<Expr>> &space_vars)
+                : parent(parent), shift_regs_allocates(shift_regs_allocates), shift_regs_bounds(shift_regs_bounds), temp_regs_bounds(temp_regs_bounds), space_vars(space_vars) {
+            }
             void visit(const Call *op) override;
             void visit(const Realize *op) override;
             void print_irregular_bounds_allocates(std::string reg_name, std::string type, std::string name, Region space_bounds, Region time_bounds, int space_bound_level);
         };
-        std::map<std::string, std::vector<std::string>> shift_regs_allocates; // For all shift regs
-        std::map<std::string, size_t> shift_regs_bounds; // Only for shift regs whose types are nonstandard_vectors
-        std::map<std::string, size_t> temp_regs_bounds; // Only for temp regs whose types are nonstandard_vectors
-        std::map<std::string, std::vector<Expr>> space_vars; // For shift regs with irregular bounds
+        std::map<std::string, std::vector<std::string>> shift_regs_allocates;  // For all shift regs
+        std::map<std::string, size_t> shift_regs_bounds;                       // Only for shift regs whose types are nonstandard_vectors
+        std::map<std::string, size_t> temp_regs_bounds;                        // Only for temp regs whose types are nonstandard_vectors
+        std::map<std::string, std::vector<Expr>> space_vars;                   // For shift regs with irregular bounds
         // For saving the pointer args streamed from scehduler
         std::map<std::string, std::string> pointer_args;
 
@@ -234,10 +254,9 @@ protected:
 private:
     // Methods only for generating OpenCL code for Intel FPGAs
     void compile_to_aocx(std::ostringstream &src_stream);
-
 };
 
-CodeGen_OpenCL_Dev::CodeGen_OpenCL_Dev(Target t)
+CodeGen_OpenCL_Dev::CodeGen_OpenCL_Dev(const Target &t)
     : clc(src_stream, t) {
 }
 
@@ -272,7 +291,7 @@ bool CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::is_standard_opencl_type(Type type) {
             standard_bits = true;
         }
     }
-    if ((lanes == 1) || (lanes == 2) || (lanes == 3) ||(lanes == 4) ||
+    if ((lanes == 1) || (lanes == 2) || (lanes == 3) || (lanes == 4) ||
         (lanes == 8) || (lanes == 16)) {
         standard_lanes = true;
     }
@@ -373,18 +392,18 @@ Expr CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::DefineVectorStructTypes::mutate(const
             //      struct {float s0, s1, s2, s3, s4, s5, s6,s7, s8, s9, sa, sb, sc, sd, se, sf, s16;};
             //   } float17;
             // The first 16 elements follow the standard OpenCL vector notation.
-             std::ostringstream oss;
-             oss << "typedef union {\n"
-                 << parent->print_type(type.element_of())
-                 << " __attribute__ ((aligned(" << closest_power_of_two(type.lanes() * type.with_lanes(1).bytes())
-                 << ")))" << " s[" << type.lanes() << "];\n"
-                 << "struct {" << parent->print_type(type.element_of());
-             for (int i = 0; i < type.lanes(); i++) {
-                 oss << (i == 0 ? "" : ", ") << " s" << parent->vector_index_to_string(i);
-             }
-             oss << ";};\n"
-                 << "} " << parent->print_type(type.element_of()) << type.lanes() << ";\n";
-             vectors += oss.str();
+            std::ostringstream oss;
+            oss << "typedef union {\n"
+                << parent->print_type(type.element_of())
+                << " __attribute__ ((aligned(" << closest_power_of_two(type.lanes() * type.with_lanes(1).bytes())
+                << ")))" << " s[" << type.lanes() << "];\n"
+                << "struct {" << parent->print_type(type.element_of());
+            for (int i = 0; i < type.lanes(); i++) {
+                oss << (i == 0 ? "" : ", ") << " s" << parent->vector_index_to_string(i);
+            }
+            oss << ";};\n"
+                << "} " << parent->print_type(type.element_of()) << type.lanes() << ";\n";
+            vectors += oss.str();
         }
     } else if (type.is_generated_struct()) {
         std::ostringstream oss;
@@ -494,20 +513,20 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const For *loop) {
             }
         }
         loop->body.accept(this);
-    } else if(ends_with(loop->name, ".infinite")){
+    } else if (ends_with(loop->name, ".infinite")) {
         stream << get_indent() << "while(1)\n";
         open_scope();
         loop->body.accept(this);
-        close_scope("while "+print_name(loop->name));
-    } else if (ends_with(loop->name,"remove")){
+        close_scope("while " + print_name(loop->name));
+    } else if (ends_with(loop->name, "remove")) {
         loop->body.accept(this);
     } else if (loop->for_type == ForType::DelayUnroll) {
         Expr extent = simplify(loop->extent);
         Stmt body = loop->body;
         const IntImm *e = extent.as<IntImm>();
         user_assert(e)
-                << "Can only unroll for loops over a constant extent.\n"
-                << "Loop over " << loop->name << " has extent " << extent << ".\n";
+            << "Can only unroll for loops over a constant extent.\n"
+            << "Loop over " << loop->name << " has extent " << extent << ".\n";
         if (e->value == 1) {
             user_warning << "Warning: Unrolling a for loop of extent 1: " << loop->name << "\n";
         }
@@ -559,8 +578,8 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const For *loop) {
                 Stmt body = loop->body;
                 const IntImm *e = extent.as<IntImm>();
                 user_assert(e)
-                        << "Can only unroll for loops over a constant extent.\n"
-                        << "Loop over " << loop->name << " has extent " << extent << ".\n";
+                    << "Can only unroll for loops over a constant extent.\n"
+                    << "Loop over " << loop->name << " has extent " << extent << ".\n";
                 if (e->value == 1) {
                     user_warning << "Warning: Unrolling a for loop of extent 1: " << loop->name << "\n";
                 }
@@ -656,7 +675,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Broadcast *op) {
             }
         }
         print_assignment(op->type.with_lanes(op->lanes), s);
-    } else{
+    } else {
         print_assignment(op->type.with_lanes(op->lanes), id_value);
     }
 }
@@ -729,24 +748,24 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
     } else if (op->is_intrinsic(Call::read_channel)) {
         std::string string_channel_index;
         const StringImm *v = op->args[0].as<StringImm>();
-        for (unsigned i = 1; i < op->args.size(); i++ ){
+        for (unsigned i = 1; i < op->args.size(); i++) {
             Expr e = op->args[i];
             assert(e.type() == Int(32));
             std::string sindex = print_expr(e);
             assert(!sindex.empty());
-            string_channel_index += "["+sindex+"]";
+            string_channel_index += "[" + sindex + "]";
         }
         id = '_' + unique_name('_');
         int size = (v->value).rfind(".");
         std::string channel_name = v->value;
         debug(4) << "channel name: " << channel_name << "\n";
-        if (size < (int)(v->value.size())-1) {
+        if (size < (int)(v->value.size()) - 1) {
             std::string suffix = (v->value).substr(size + 1, (int)v->value.size() - size - 1);
             // eliminate useless suffix
             while (suffix != "channel") {
                 channel_name = (channel_name).substr(0, size);
                 size = (channel_name).rfind(".");
-                if (size < (int)(channel_name.size())-1) {
+                if (size < (int)(channel_name.size()) - 1) {
                     suffix = (channel_name).substr(size + 1, (int)channel_name.size() - size - 1);
                 } else {
                     break;
@@ -764,24 +783,24 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
         std::string string_channel_index;
         const StringImm *v = op->args[0].as<StringImm>();
         const StringImm *read_success = op->args[1].as<StringImm>();
-        for (unsigned i = 2; i < op->args.size(); i++ ){
+        for (unsigned i = 2; i < op->args.size(); i++) {
             Expr e = op->args[i];
             assert(e.type() == Int(32));
             std::string sindex = print_expr(e);
             assert(!sindex.empty());
-            string_channel_index += "["+sindex+"]";
+            string_channel_index += "[" + sindex + "]";
         }
         id = '_' + unique_name('_');
         int size = (v->value).rfind(".");
         std::string channel_name = v->value;
         debug(4) << "channel name: " << channel_name << "\n";
-        if (size < (int)(v->value.size())-1) {
+        if (size < (int)(v->value.size()) - 1) {
             std::string suffix = (v->value).substr(size + 1, (int)v->value.size() - size - 1);
             // eliminate useless suffix
             while (suffix != "channel") {
                 channel_name = (channel_name).substr(0, size);
                 size = (channel_name).rfind(".");
-                if (size < (int)(channel_name.size())-1) {
+                if (size < (int)(channel_name.size()) - 1) {
                     suffix = (channel_name).substr(size + 1, (int)channel_name.size() - size - 1);
                 } else {
                     break;
@@ -796,7 +815,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
         //     channel_name = (v->value).substr(0, size);
         // }
         stream << get_indent() << print_type(op->type) << " " << id << " = read_channel_nb_intel("
-                << print_name(channel_name) << string_channel_index << ", &" << print_name(read_success->value) << ");\n";
+               << print_name(channel_name) << string_channel_index << ", &" << print_name(read_success->value) << ");\n";
     } else if (op->is_intrinsic(Call::write_channel)) {
         const StringImm *v = op->args[0].as<StringImm>();
         // Do not directly print to stream: there might have been a cached value useable.
@@ -804,13 +823,13 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
         int size = (v->value).rfind(".");
         std::string channel_name = v->value;
         debug(4) << "channel name: " << channel_name << "\n";
-        if (size < (int)(v->value.size())-1) {
+        if (size < (int)(v->value.size()) - 1) {
             std::string suffix = (v->value).substr(size + 1, (int)v->value.size() - size - 1);
             // eliminate useless suffix
             while (suffix != "channel") {
                 channel_name = (channel_name).substr(0, size);
                 size = (channel_name).rfind(".");
-                if (size < (int)(channel_name.size())-1) {
+                if (size < (int)(channel_name.size()) - 1) {
                     suffix = (channel_name).substr(size + 1, (int)channel_name.size() - size - 1);
                 } else {
                     break;
@@ -822,7 +841,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
         }
         debug(4) << "modified channel name: " << channel_name << "\n";
         rhs << print_name(channel_name);
-        for (unsigned i = 2; i < op->args.size(); i++ ){
+        for (unsigned i = 2; i < op->args.size(); i++) {
             Expr e = op->args[i];
             assert(e.type() == Int(32));
             rhs << "[";
@@ -841,13 +860,13 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
         int size = (v->value).rfind(".");
         std::string channel_name = v->value;
         debug(4) << "channel name: " << channel_name << "\n";
-        if (size < (int)(v->value.size())-1) {
+        if (size < (int)(v->value.size()) - 1) {
             std::string suffix = (v->value).substr(size + 1, (int)v->value.size() - size - 1);
             // eliminate useless suffix
             while (suffix != "channel") {
                 channel_name = (channel_name).substr(0, size);
                 size = (channel_name).rfind(".");
-                if (size < (int)(channel_name.size())-1) {
+                if (size < (int)(channel_name.size()) - 1) {
                     suffix = (channel_name).substr(size + 1, (int)channel_name.size() - size - 1);
                 } else {
                     break;
@@ -859,7 +878,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
         }
         debug(4) << "modified channel name: " << channel_name << "\n";
         rhs << print_name(channel_name);
-        for (unsigned i = 3; i < op->args.size(); i++ ){
+        for (unsigned i = 3; i < op->args.size(); i++) {
             Expr e = op->args[i];
             assert(e.type() == Int(32));
             rhs << "[";
@@ -871,9 +890,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
         rhs << write_data;
         stream << get_indent() << print_name(write_success->value) << " = write_channel_nb_intel(" << rhs.str() << ");\n";
     } else if (op->is_intrinsic(Call::read_array)) {
-        std::string arr_name = op->args[0].as<StringImm>()
-                                ? print_name(op->args[0].as<StringImm>()->value)
-                                : print_expr(op->args[0]);
+        std::string arr_name = op->args[0].as<StringImm>() ? print_name(op->args[0].as<StringImm>()->value) : print_expr(op->args[0]);
         // read the entire array as a whole
         if (op->args.size() == 1) {
             std::string string_index = op->type.is_handle() ? "" : ".s";
@@ -884,7 +901,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
                 string_index += "[" + print_expr(op->args[i]) + "]";
             id = '_' + unique_name('_');
             stream << get_indent() << print_type(op->type) << " " << id
-                   <<" = " << arr_name << string_index << ";\n";
+                   << " = " << arr_name << string_index << ";\n";
         }
     } else if (op->is_intrinsic(Call::write_array)) {
         std::string arr_name = op->args[0].as<StringImm>()->value;
@@ -913,15 +930,15 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
                 assert(!sindex.empty());
                 if (i == op->args.size() - 1 && (shift_regs_bounds.find(v->value) != shift_regs_bounds.end())) {
                     // This is the last arg, and every shift reg is a non-standard vector
-                    internal_assert(shift_regs_bounds[v->value] == op->args.size() - 1 || // this last arg is indexing a vector
-                                    shift_regs_bounds[v->value] == op->args.size() - 2);  // this last arg is indexing a vector element
+                    internal_assert(shift_regs_bounds[v->value] == op->args.size() - 1 ||  // this last arg is indexing a vector
+                                    shift_regs_bounds[v->value] == op->args.size() - 2);   // this last arg is indexing a vector element
                     if (shift_regs_bounds[v->value] == op->args.size() - 1) {
-                        string_index += "["+sindex+"]";
+                        string_index += "[" + sindex + "]";
                     } else {
-                        string_index += ".s["+sindex+"]";
+                        string_index += ".s[" + sindex + "]";
                     }
                 } else {
-                    string_index += "["+sindex+"]";
+                    string_index += "[" + sindex + "]";
                 }
             }
             id = '_' + unique_name('_');
@@ -930,13 +947,13 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
             int size = (v->value).rfind(".");
             std::string shreg_name = v->value;
             debug(4) << "shreg name: " << shreg_name << "\n";
-            if (size < (int)(v->value.size())-1) {
+            if (size < (int)(v->value.size()) - 1) {
                 std::string suffix = (v->value).substr(size + 1, (int)v->value.size() - size - 1);
                 // eliminate useless suffix
                 while (suffix != "shreg") {
                     shreg_name = (shreg_name).substr(0, size);
                     size = (shreg_name).rfind(".");
-                    if (size < (int)(shreg_name.size())-1) {
+                    if (size < (int)(shreg_name.size()) - 1) {
                         suffix = (shreg_name).substr(size + 1, (int)shreg_name.size() - size - 1);
                     } else {
                         break;
@@ -959,7 +976,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
                 assert(e.type() == Int(32));
                 std::string sindex = print_expr(e);
                 assert(!sindex.empty());
-                suffix_index += "_"+sindex;
+                suffix_index += "_" + sindex;
             }
             // print regular time loop index
             for (size_t i = 1 + vars.size(); i < op->args.size(); i++) {
@@ -969,28 +986,28 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
                 assert(!sindex.empty());
                 if (i == op->args.size() - 1 && (shift_regs_bounds.find(v->value) != shift_regs_bounds.end())) {
                     // This is the last arg, and every shift reg is a non-standard vector
-                    internal_assert(shift_regs_bounds[v->value] == op->args.size() - 1 || // this last arg is indexing a vector
-                                    shift_regs_bounds[v->value] == op->args.size() - 2);  // this last arg is indexing a vector element
+                    internal_assert(shift_regs_bounds[v->value] == op->args.size() - 1 ||  // this last arg is indexing a vector
+                                    shift_regs_bounds[v->value] == op->args.size() - 2);   // this last arg is indexing a vector element
                     if (shift_regs_bounds[v->value] == op->args.size() - 1) {
-                        string_index += "["+sindex+"]";
+                        string_index += "[" + sindex + "]";
                     } else {
-                        string_index += ".s["+sindex+"]";
+                        string_index += ".s[" + sindex + "]";
                     }
                 } else {
-                    string_index += "["+sindex+"]";
+                    string_index += "[" + sindex + "]";
                 }
             }
             ostringstream rhs;
             int size = (v->value).rfind(".");
             std::string shreg_name = v->value;
             debug(4) << "shreg name: " << shreg_name << "\n";
-            if (size < (int)(v->value.size())-1) {
+            if (size < (int)(v->value.size()) - 1) {
                 std::string suffix = (v->value).substr(size + 1, (int)v->value.size() - size - 1);
                 // eliminate useless suffix
                 while (suffix != "shreg") {
                     shreg_name = (shreg_name).substr(0, size);
                     size = (shreg_name).rfind(".");
-                    if (size < (int)(shreg_name.size())-1) {
+                    if (size < (int)(shreg_name.size()) - 1) {
                         suffix = (shreg_name).substr(size + 1, (int)shreg_name.size() - size - 1);
                     } else {
                         break;
@@ -1014,13 +1031,13 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
             int size = (v->value).rfind(".");
             std::string shreg_name = v->value;
             debug(4) << "shreg name: " << shreg_name << "\n";
-            if (size < (int)(v->value.size())-1) {
+            if (size < (int)(v->value.size()) - 1) {
                 std::string suffix = (v->value).substr(size + 1, (int)v->value.size() - size - 1);
                 // eliminate useless suffix
                 while (suffix != "shreg") {
                     shreg_name = (shreg_name).substr(0, size);
                     size = (shreg_name).rfind(".");
-                    if (size < (int)(shreg_name.size())-1) {
+                    if (size < (int)(shreg_name.size()) - 1) {
                         suffix = (shreg_name).substr(size + 1, (int)shreg_name.size() - size - 1);
                     } else {
                         break;
@@ -1035,25 +1052,25 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
             rhs << print_name(shreg_name);
             // write shift register should has at leat 2 arguments
             internal_assert((int)op->args.size() >= 2);
-            for (size_t i = 1; i < op->args.size()-1; i++) {
+            for (size_t i = 1; i < op->args.size() - 1; i++) {
                 Expr e = op->args[i];
                 assert(e.type() == Int(32));
                 std::string sindex = print_expr(e);
                 assert(!sindex.empty());
                 if (i == op->args.size() - 2 && (shift_regs_bounds.find(v->value) != shift_regs_bounds.end())) {
                     // This is the last arg, and every shift reg is a non-standard vector
-                    internal_assert(shift_regs_bounds[v->value] == op->args.size() - 2 || // this last arg is indexing a vector
-                                    shift_regs_bounds[v->value] == op->args.size() - 3);  // this last arg is indexing a vector element
+                    internal_assert(shift_regs_bounds[v->value] == op->args.size() - 2 ||  // this last arg is indexing a vector
+                                    shift_regs_bounds[v->value] == op->args.size() - 3);   // this last arg is indexing a vector element
                     if (shift_regs_bounds[v->value] == op->args.size() - 2) {
-                        rhs << "["+sindex+"]";
+                        rhs << "[" + sindex + "]";
                     } else {
-                        rhs << ".s["+sindex+"]";
+                        rhs << ".s[" + sindex + "]";
                     }
                 } else {
-                    rhs << "["+sindex+"]";
+                    rhs << "[" + sindex + "]";
                 }
             }
-            std::string write_data = print_expr(op->args[op->args.size()-1]);
+            std::string write_data = print_expr(op->args[op->args.size() - 1]);
 
             // After writing to a shift register, the original cached value is no longer valid.
             auto cached = cache.find(rhs.str());
@@ -1067,13 +1084,13 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
             int size = (v->value).rfind(".");
             std::string shreg_name = v->value;
             debug(4) << "shreg name: " << shreg_name << "\n";
-            if (size < (int)(v->value.size())-1) {
+            if (size < (int)(v->value.size()) - 1) {
                 std::string suffix = (v->value).substr(size + 1, (int)v->value.size() - size - 1);
                 // eliminate useless suffix
                 while (suffix != "shreg") {
                     shreg_name = (shreg_name).substr(0, size);
                     size = (shreg_name).rfind(".");
-                    if (size < (int)(shreg_name.size())-1) {
+                    if (size < (int)(shreg_name.size()) - 1) {
                         suffix = (shreg_name).substr(size + 1, (int)shreg_name.size() - size - 1);
                     } else {
                         break;
@@ -1094,34 +1111,34 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
                 rhs << "_";
                 rhs << print_expr(e);
             }
-            for (size_t i = 1 + vars.size(); i < op->args.size()-1; i++) {
+            for (size_t i = 1 + vars.size(); i < op->args.size() - 1; i++) {
                 Expr e = op->args[i];
                 assert(e.type() == Int(32));
                 std::string sindex = print_expr(e);
                 assert(!sindex.empty());
                 if (i == op->args.size() - 2 && (shift_regs_bounds.find(v->value) != shift_regs_bounds.end())) {
                     // This is the last arg, and every shift reg is a non-standard vector
-                    internal_assert(shift_regs_bounds[v->value] == op->args.size() - 2 || // this last arg is indexing a vector
-                                    shift_regs_bounds[v->value] == op->args.size() - 3);  // this last arg is indexing a vector element
+                    internal_assert(shift_regs_bounds[v->value] == op->args.size() - 2 ||  // this last arg is indexing a vector
+                                    shift_regs_bounds[v->value] == op->args.size() - 3);   // this last arg is indexing a vector element
                     if (shift_regs_bounds[v->value] == op->args.size() - 2) {
-                        rhs << "["+sindex+"]";
+                        rhs << "[" + sindex + "]";
                     } else {
-                        rhs << ".s["+sindex+"]";
+                        rhs << ".s[" + sindex + "]";
                     }
                 } else {
-                    rhs << "["+sindex+"]";
+                    rhs << "[" + sindex + "]";
                 }
             }
-            std::string write_data = print_expr(op->args[op->args.size()-1]);
+            std::string write_data = print_expr(op->args[op->args.size() - 1]);
             stream << get_indent() << rhs.str() << " = " << write_data << ";\n";
         }
     } else if (ends_with(op->name, ".ibuffer")) {
-        std::string name = op->name.substr(0, op->name.length()-std::string(".ibuffer").size());
+        std::string name = op->name.substr(0, op->name.length() - std::string(".ibuffer").size());
         string buffer_name = name + '.' + std::to_string(op->value_index) + ".ibuffer";
         // Do not directly print to stream: there might have been a cached value useable.
         ostringstream rhs;
         rhs << print_name(buffer_name);
-        for(size_t i = 0; i < op->args.size(); i++) {
+        for (size_t i = 0; i < op->args.size(); i++) {
             rhs << "[";
             rhs << print_expr(op->args[i]);
             rhs << "]";
@@ -1132,9 +1149,9 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
         // Do not directly print to stream: there might have been a cached value useable.
         ostringstream rhs;
         rhs << print_name(name);
-        for(size_t i = 0; i < op->args.size(); i++) {
+        for (size_t i = 0; i < op->args.size(); i++) {
             if (i == op->args.size() - 1 && (temp_regs_bounds.find(name) != temp_regs_bounds.end())) {
-                internal_assert(temp_regs_bounds[name] == op->args.size() || // this last arg is indexing a vector
+                internal_assert(temp_regs_bounds[name] == op->args.size() ||     // this last arg is indexing a vector
                                 temp_regs_bounds[name] == op->args.size() - 1);  // this last arg is indexing a vector element
                 if (temp_regs_bounds[name] == op->args.size()) {
                     rhs << "[";
@@ -1238,7 +1255,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
             internal_assert(op->args[1].as<IntImm>());
             int queue_index = op->args[1].as<IntImm>()->value;
             stream << get_indent() << "arg_t inputs = read_channel_intel(q["
-                << queue_index << "]);\n";
+                   << queue_index << "]);\n";
             stream << get_indent() << "mem_fence(CLK_CHANNEL_MEM_FENCE);\n\n";
 
         } else if (type == "kernel_end") {
@@ -1256,7 +1273,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
             stream << get_indent() << "mem_fence(CLK_CHANNEL_MEM_FENCE);\n";
             stream << get_indent() << "write_channel_intel(q_ret[" << queue_index << "], inputs.finish);\n";
 
-        // Print data from task channel for autorun kernels
+            // Print data from task channel for autorun kernels
         } else if (type == "data") {
             ostringstream rhs;
             internal_assert(op->args[1].as<StringImm>());
@@ -1292,7 +1309,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
 )";
         }
 
-    // Print task switching loop body
+        // Print task switching loop body
     } else if (op->is_intrinsic(Call::overlay)) {
 
         char *overlay_num = getenv("HL_OVERLAY_NUM");
@@ -1309,8 +1326,8 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
         };
 
         struct input {
-            string  name;
-            string  value;
+            string name;
+            string value;
         };
 
         int dep_queue_index = -1;
@@ -1334,29 +1351,29 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
                     size_t pos = arg_name.find(delimiter);
                     string id = arg_name.substr(0, pos);
 
-                    string value = arg_name.substr(pos + delimiter.length()) + " + " + print_expr(op->args[k+1]);
+                    string value = arg_name.substr(pos + delimiter.length()) + " + " + print_expr(op->args[k + 1]);
                     input entry = {id, value};
                     k++;
                     inputs.push_back(entry);
                 } else if (starts_with(arg_name, "inputs.constants")) {
-                    input entry = {arg_name, print_expr(op->args[k+1])};
+                    input entry = {arg_name, print_expr(op->args[k + 1])};
                     k++;
                     inputs.push_back(entry);
                 } else {
                     internal_assert(false) << "Unrecognized arg input "
-                        << arg_name << " in the enqueue() function given...";
+                                           << arg_name << " in the enqueue() function given...";
                 }
 
-            // Depending queue index
+                // Depending queue index
             } else if (auto queue = e.as<IntImm>()) {
                 dep_queue_index = queue->value;
                 info[dep_queue_index] = {{}, {}};
 
-            // Depending task iter var index
+                // Depending task iter var index
             } else if (e.as<Add>() || e.as<Variable>() || e.as<Sub>()) {
                 info[dep_queue_index].iter_vars.push_back(e);
 
-            // Depending task conditions
+                // Depending task conditions
             } else if (e.as<GT>() || e.as<LT>() || e.as<NE>() || e.as<GE>() || e.as<LE>()) {
                 info[dep_queue_index].conditions.push_back(e);
             }
@@ -1370,7 +1387,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
 
         int cond_num = 0;
         ostringstream temp;
-        for (auto& kv : info) {
+        for (auto &kv : info) {
             string cond;
             // Print depending task iter var index
             if (kv.second.conditions.size() > 0) {
@@ -1383,13 +1400,13 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
                     }
                 }
 
-                temp << get_indent()  << "index_t dep_" << task_id << "_" << dep_num
+                temp << get_indent() << "index_t dep_" << task_id << "_" << dep_num
                      << " = {" << kv.first << ", {";
 
                 for (unsigned int o = 0; o < kv.second.iter_vars.size(); o++) {
                     temp << cond << " ? "
-                        << print_expr(kv.second.iter_vars[o])
-                        << " : -1";
+                         << print_expr(kv.second.iter_vars[o])
+                         << " : -1";
                     if (o != kv.second.iter_vars.size() - 1) temp << ", ";
                 }
             } else {
@@ -1404,8 +1421,8 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
 
             temp << "}};\n";
             temp << get_indent() << "task.deps[" << dep_num << "]"
-                   << " = dep_" << task_id << "_" << dep_num << ";\n";
-            dep_num ++;
+                 << " = dep_" << task_id << "_" << dep_num << ";\n";
+            dep_num++;
         }
 
         stream << temp.str();
@@ -1421,11 +1438,11 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Call *op) {
 
         // Prepare input information
         stream << get_indent() << "inputs.finish = task.index;\n";
-        for (auto& input : inputs) {
+        for (auto &input : inputs) {
             string name = input.name;
             string prefix = (starts_with(name, "inputs.args")) ? "_" : "";
             stream << get_indent() << input.name << " = "
-                << prefix << input.value << ";\n";
+                   << prefix << input.value << ";\n";
         }
         stream << get_indent() << "task.inputs = inputs;\n";
         stream << get_indent() << "write_channel_intel(qt, task);\n";
@@ -1461,8 +1478,8 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Load *op) {
         if (!is_standard_opencl_type(op->type)) {
             // For compiler-generated vector types, read in the way like *((float6*) address)
             rhs << "*((" << get_memory_space(op->name) << " "
-                   << print_type(op->type) << "*)(" << print_name(op->name)
-                   << " + " << id_ramp_base << "))";
+                << print_type(op->type) << "*)(" << print_name(op->name)
+                << " + " << id_ramp_base << "))";
         } else if (op->type.is_complex()) {
             string ctype = "float";
             if (op->type.bits() == 128) {
@@ -1663,16 +1680,16 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Store *op) {
             }
             if (t.lanes() == 1) {
                 stream << get_indent() << "vstore" << t.lanes() * 2 << "("
-                    << id_value << ", "
-                    << 0 << ", (" << get_memory_space(op->name) << " " << ctype << "*)("
-                    << print_name(op->name) << " + " << id_ramp_base
-                    << "));\n";
+                       << id_value << ", "
+                       << 0 << ", (" << get_memory_space(op->name) << " " << ctype << "*)("
+                       << print_name(op->name) << " + " << id_ramp_base
+                       << "));\n";
             } else {
                 stream << get_indent() << "vstore" << t.lanes() * 2 << "("
-                    << id_value << ".t, "
-                    << 0 << ", (" << get_memory_space(op->name) << " " << ctype << "*)("
-                    << print_name(op->name) << " + " << id_ramp_base
-                    << "));\n";
+                       << id_value << ".t, "
+                       << 0 << ", (" << get_memory_space(op->name) << " " << ctype << "*)("
+                       << print_name(op->name) << " + " << id_ramp_base
+                       << "));\n";
             }
         } else {
             stream << get_indent() << "vstore" << t.lanes() << "("
@@ -1790,7 +1807,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Mul *op) {
                 << sa << ".s0 * " << sb << ".s1 + " << sa << ".s1 * " << sb << ".s0" << "}";
         } else {
             internal_assert(t.is_vector() && a.type().is_vector() && t.lanes() == a.type().lanes());
-            oss << "(" << print_type(t) << ")" << "(" << (t .bits() == 64 ? "float" : "double")
+            oss << "(" << print_type(t) << ")" << "(" << (t.bits() == 64 ? "float" : "double")
                 << 2 * t.lanes() << ") {"
                 << sa << ".t.s0 * " << sb << ".t.s0 - " << sa << ".t.s1 * " << sb << ".t.s1" << ", "
                 << sa << ".t.s0 * " << sb << ".t.s1 + " << sa << ".t.s1 * " << sb << ".t.s0";
@@ -2000,10 +2017,9 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Shuffle *op) {
         // implement shuffle for other cases
         internal_assert(op->indices.size() == 1 || (int)op->indices.size() == op_lanes)
             << "Shuffle indices length not match expected lane size\n";
-        internal_assert(op_lanes == 1 || op_lanes == 2 || op_lanes == 3 || op_lanes == 4
-            || op_lanes == 8 || op_lanes == 16 ||
-            // Otherwise, this is to merge several inputs into a non-standard vector type
-            (op->is_concat() && !is_standard_opencl_type(op->type)))
+        internal_assert(op_lanes == 1 || op_lanes == 2 || op_lanes == 3 || op_lanes == 4 || op_lanes == 8 || op_lanes == 16 ||
+                        // Otherwise, this is to merge several inputs into a non-standard vector type
+                        (op->is_concat() && !is_standard_opencl_type(op->type)))
             << "Unsupported vector length, only support"
             << " length in [1, 2, 3, 4, 8, 16] in OpenCL\n";
         int num_vectors = op->vectors.size();
@@ -2014,9 +2030,8 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Shuffle *op) {
         for (int i = 0; i < num_vectors; ++i) {
             arg_exprs[i] = print_expr(op->vectors[i]);
             int arg_lanes = op->vectors[i].type().lanes();
-            internal_assert(arg_lanes == 1 || arg_lanes == 2 || arg_lanes == 3 || arg_lanes == 4
-            || arg_lanes == 8 || arg_lanes == 16) << "Unsupported vector length, only support"
-                                                << " length in [1, 2, 3, 4, 8, 16] in OpenCL\n";
+            internal_assert(arg_lanes == 1 || arg_lanes == 2 || arg_lanes == 3 || arg_lanes == 4 || arg_lanes == 8 || arg_lanes == 16) << "Unsupported vector length, only support"
+                                                                                                                                       << " length in [1, 2, 3, 4, 8, 16] in OpenCL\n";
             total_lanes += arg_lanes;
             is_vec.push_back(arg_lanes > 1);
             for (int j = 0; j < arg_lanes; ++j) {
@@ -2115,9 +2130,12 @@ class IsAutorun : public IRVisitor {
         }
         IRVisitor::visit(op);
     }
-    public:
-        bool is_autorun;
-        IsAutorun() : is_autorun(false) {}
+
+public:
+    bool is_autorun;
+    IsAutorun()
+        : is_autorun(false) {
+    }
 };
 
 void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::add_kernel(Stmt s,
@@ -2125,11 +2143,6 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::add_kernel(Stmt s,
                                                       const vector<DeviceArgument> &args) {
 
     debug(2) << "Adding OpenCL kernel " << name << "\n";
-
-    //debug(2) << "Eliminating bool vectors\n";
-    //s = eliminate_bool_vectors(s);
-    //debug(2) << "After eliminating bool vectors:\n"
-    //         << s << "\n";
 
     // Figure out which arguments should be passed in __constant.
     // Such arguments should be:
@@ -2159,7 +2172,6 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::add_kernel(Stmt s,
     for (size_t i = 1; i < constants.size(); i++) {
         constants[i].size += constants[i - 1].size;
     }
-
 
     // Create preprocessor replacements for the address spaces of all our buffers.
     stream << "// Address spaces for " << name << "\n";
@@ -2320,14 +2332,14 @@ void CodeGen_OpenCL_Dev::init_module() {
                << "inline float2 sqrt_c32(float2 x) {return (float2)(sqrt_f32(x.s0), 0.0f); }\n"
                << "inline float2 fast_inverse_c32(float2 x) {return (float2)(fast_inverse_f32(x.s0), 0.0f); }\n"
                << "inline float2 fast_inverse_sqrt_c32(float2 x) {return (float2)(fast_inverse_sqrt_f32(x.s0), 0.0f); }\n";
-            //    << "typedef double2 complexd;\n"
-            //    << "typedef union { double4 t; double2 s[2]; } complexd2;\n"
-            //    << "typedef union { double8 t; double2 s[4]; } complexd4;\n"
-            //    << "typedef union { double16 t; double2 s[8]; } complexd8;\n"
-            //    << "inline double2 conjugate_c64(double2 x) {return (double2)(x.s0, -x.s1); }\n";
-            //    << "inline double2 sqrt_c64(double2 x) {return (double2)(sqrt_f64(x.s0), 0.0f); }\n"
-            //    << "inline double2 fast_inverse_c64(double2 x) {return (double2)(fast_inverse_f64(x.s0), 0.0f); }\n"
-            //    << "inline double2 fast_inverse_sqrt_c64(double2 x) {return (double2)(fast_inverse_sqrt_f64(x.s0), 0.0f); }\n";
+    //    << "typedef double2 complexd;\n"
+    //    << "typedef union { double4 t; double2 s[2]; } complexd2;\n"
+    //    << "typedef union { double8 t; double2 s[4]; } complexd4;\n"
+    //    << "typedef union { double16 t; double2 s[8]; } complexd8;\n"
+    //    << "inline double2 conjugate_c64(double2 x) {return (double2)(x.s0, -x.s1); }\n";
+    //    << "inline double2 sqrt_c64(double2 x) {return (double2)(sqrt_f64(x.s0), 0.0f); }\n"
+    //    << "inline double2 fast_inverse_c64(double2 x) {return (double2)(fast_inverse_f64(x.s0), 0.0f); }\n"
+    //    << "inline double2 fast_inverse_sqrt_c64(double2 x) {return (double2)(fast_inverse_sqrt_f64(x.s0), 0.0f); }\n";
 
     // There does not appear to be a reliable way to safely ignore unused
     // variables in OpenCL C. See https://github.com/halide/Halide/issues/4918.
@@ -2409,7 +2421,7 @@ void CodeGen_OpenCL_Dev::init_module() {
     }
 
     if (target.has_feature(Target::IntelFPGA)) {
-        //enable channels support
+        // enable channels support
         src_stream << "#pragma OPENCL EXTENSION cl_intel_channels : enable\n";
     }
 
@@ -2420,7 +2432,7 @@ void CodeGen_OpenCL_Dev::init_module() {
         char *space_dim = getenv("HL_SPACE_DIM");
         char *overlay_dtype = getenv("HL_OVERLAY_DTYPE");
         src_stream << "#define DTYPE  " << string(overlay_dtype)
-            << "  // default data type\n";
+                   << "  // default data type\n";
 
         src_stream << "#define K      " << ip_num << "   // number of IPs\n";
         src_stream << "#define M      " << std::atoi(space_dim) << "   // number of iter space var\n";
@@ -2586,7 +2598,7 @@ __kernel void scheduler() {
         for (int t = 0; t < ip_num; t++) {
             src_stream << string(16, ' ') << "case " << t << ": {\n";
             src_stream << string(20, ' ') << "write_channel_intel(q["
-                << t << "], task.inputs);\n";
+                       << t << "], task.inputs);\n";
             src_stream << string(20, ' ') << "break;\n";
             src_stream << string(16, ' ') << "}\n";
         }
@@ -2603,11 +2615,11 @@ __kernel void scheduler() {
 )";
         for (int t = 0; t < ip_num; t++) {
             src_stream << string(16, ' ') << "case " << t
-                << ": {\n";
-            src_stream << string(20, ' ') << "ret = read_channel_nb_intel(q_ret["<< t <<"], &ret_valid); \n";
+                       << ": {\n";
+            src_stream << string(20, ' ') << "ret = read_channel_nb_intel(q_ret[" << t << "], &ret_valid); \n";
             src_stream << string(20, ' ') << "while (ret_valid) {\n";
             src_stream << string(24, ' ') << "update(&graph, ret);\n"
-                       << string(24, ' ') << "ret = read_channel_nb_intel(q_ret["<< t <<"], &ret_valid); \n";
+                       << string(24, ' ') << "ret = read_channel_nb_intel(q_ret[" << t << "], &ret_valid); \n";
             src_stream << string(20, ' ') << "}\n"
                        << string(20, ' ') << "break;\n";
             src_stream << string(16, ' ') << "}\n";
@@ -2632,11 +2644,10 @@ __kernel void scheduler() {
         std::string text(overlay_kenrel_files);
         std::size_t start = 0, end = 0;
         while ((end = text.find(" ", start)) != std::string::npos) {
-        src_stream << "#include \"" << text.substr(start, end - start) << ".cl\"\n";
-        start = end + 1;
+            src_stream << "#include \"" << text.substr(start, end - start) << ".cl\"\n";
+            start = end + 1;
         }
         src_stream << "#include \"" << text.substr(start) << ".cl\"\n\n";
-
     }
 
     cur_kernel_name = "";
@@ -2676,8 +2687,8 @@ void CodeGen_OpenCL_Dev::compile_to_aocx(std::ostringstream &src_stream) {
     std::string bitstream_file = (aocx_name != NULL) ? std::string(aocx_name) : (std::string(getenv("HOME")) + "/tmp/a.aocx");
     user_assert(ends_with(bitstream_file, ".aocx")) << " Bitstream file name expected to end with \".aocx\"\n";
     user_assert(bitstream_file.size() < 300) << "The full name of the bitstream file is too long. "
-            << "Consider to define a environment variable BITSTREAM within 300 characters instead. Current file name:\n"
-            << bitstream_file << "\n";
+                                             << "Consider to define a environment variable BITSTREAM within 300 characters instead. Current file name:\n"
+                                             << bitstream_file << "\n";
 
     // If HL_OVERLAY_KERNEL is set, only compile the CL files in local
     char *overlay_kernel_name = getenv("HL_OVERLAY_KERNEL");
@@ -2766,7 +2777,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::DeclareChannels::visit(const Realize 
                 internal_assert(e_extent->value > 0);
                 bounds_str += "[" + std::to_string(e_extent->value) + "]";
             } else {
-                attributes = " __attribute__((depth(" + std::to_string(e_extent->value) +  "))) ";
+                attributes = " __attribute__((depth(" + std::to_string(e_extent->value) + "))) ";
             }
         }
         internal_assert(op->types.size() == 1) << "In generating Intel OpenCL for FPGAs, a single type is expected for a channel.\n";
@@ -2800,7 +2811,7 @@ The corresponding systolic array of above case is triangular in shape.
 */
 bool CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::is_irregular(Region &bounds) {
     bool irregular_bounds = false;
-    for (int i = bounds.size()-1; i >= 0; i--) {
+    for (int i = bounds.size() - 1; i >= 0; i--) {
         Expr extent = bounds[i].extent;
         if (!is_const(extent)) {
             irregular_bounds = true;
@@ -2831,15 +2842,15 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::GatherShiftRegsAllocates::print_irreg
             Region new_space_bounds(space_bounds);
 
             for (int j = 0; j < space_bound_level; j++) {
-                debug(4) << space_bounds[j].min << " " << space_bounds[j].extent <<"\n";
+                debug(4) << space_bounds[j].min << " " << space_bounds[j].extent << "\n";
                 new_space_bounds[j].min = simplify(substitute(space_var, iter, space_bounds[j].min));
                 new_space_bounds[j].extent = simplify(substitute(space_var, iter, space_bounds[j].extent));
-                debug(4) << new_space_bounds[j].min << " " << new_space_bounds[j].extent <<"\n";
+                debug(4) << new_space_bounds[j].min << " " << new_space_bounds[j].extent << "\n";
             }
             print_irregular_bounds_allocates(reg_name, type, new_name, new_space_bounds, time_bounds, space_bound_level - 1);
         }
     } else {
-        std::string bounds_str = "" ;
+        std::string bounds_str = "";
         // allocate time bounds as usual
         for (size_t i = 0; i < time_bounds.size(); i++) {
             Range b = time_bounds[i];
@@ -2857,7 +2868,6 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::GatherShiftRegsAllocates::print_irreg
             rhs << type << " " << new_name << bounds_str << ";\n";
             shift_regs_allocates[reg_name].push_back(rhs.str());
         }
-
     }
 }
 
@@ -2877,7 +2887,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::GatherShiftRegsAllocates::visit(const
     } else if (ends_with(op->name, ".shreg")) {
         ostringstream rhs;
         Region bounds = op->bounds;
-        std::string bounds_str = "" ;
+        std::string bounds_str = "";
         std::string type = parent->print_type(op->types[0]);
 
         if (parent->is_irregular(bounds)) {
@@ -2917,7 +2927,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::GatherShiftRegsAllocates::visit(const
             // debug(3) << shift_regs_allocates[reg_name];
 
         } else {
-            for (int i = bounds.size()-1; i >= 0; i--) {
+            for (int i = bounds.size() - 1; i >= 0; i--) {
                 Range b = bounds[i];
                 Expr extent = b.extent;
                 const IntImm *e_extent = extent.as<IntImm>();
@@ -2938,18 +2948,18 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::GatherShiftRegsAllocates::visit(const
             // Remember the bounds of the shift registers.
             shift_regs_bounds[op->name] = bounds.size();
         }
-    } else if(ends_with(op->name,".temp")){
+    } else if (ends_with(op->name, ".temp")) {
         if (op->types[0].is_complex()) {
             Region bounds = op->bounds;
             temp_regs_bounds[op->name] = bounds.size();
         }
-    } else if(ends_with(op->name,".ibuffer")){
-    } else if (ends_with(op->name,".break")){
+    } else if (ends_with(op->name, ".ibuffer")) {
+    } else if (ends_with(op->name, ".break")) {
     } else {
         // Not really shift registers. But we can allocate them as shift regs as well.
         ostringstream rhs;
         Region bounds = op->bounds;
-        std::string bounds_str = "" ;
+        std::string bounds_str = "";
         for (size_t i = 0; i < bounds.size(); i++) {
             Range b = bounds[i];
             Expr extent = b.extent;
@@ -2977,7 +2987,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Realize *op) {
         // Just skip it and get into the body.
         print_stmt(op->body);
     } else if (ends_with(op->name, ".array")) {
-        std::string string_bound = "" ;
+        std::string string_bound = "";
         std::vector<std::string> access_exprs;
         Type t = op->types[0];
         internal_assert(op->types.size() == 1 && t.is_generated_array());
@@ -2994,7 +3004,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Realize *op) {
         // We have already gathered shift regs allocates with gather_shift_regs_allocates().
         // Just skip it and get into the body.
         print_stmt(op->body);
-    } else if(ends_with(op->name,".temp")){
+    } else if (ends_with(op->name, ".temp")) {
         std::string string_bound = "";
         std::vector<std::string> access_exprs;
         for (Range b : op->bounds) {
@@ -3003,7 +3013,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Realize *op) {
         for (std::string ae : access_exprs) {
             string_bound += "[" + ae + "]";
         }
-        for(size_t i=0;i<op->types.size();i++) {
+        for (size_t i = 0; i < op->types.size(); i++) {
             // do_indent();
             std::string name = op->name;
             stream << get_indent() << print_type(op->types[i]) << " ";
@@ -3013,8 +3023,8 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Realize *op) {
             stream << print_name(name) << string_bound << ";\n";
         }
         print_stmt(op->body);
-    } else if (ends_with(op->name,".ibuffer")) {
-        std::string string_bound = "" ;
+    } else if (ends_with(op->name, ".ibuffer")) {
+        std::string string_bound = "";
         std::vector<std::string> access_exprs;
         for (Range b : op->bounds) {
             access_exprs.push_back(print_expr(b.extent));
@@ -3023,10 +3033,10 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Realize *op) {
             string_bound += "[" + ae + "]";
         }
         internal_assert(op->types.size() >= 2);
-        for (size_t i=0; i<op->types.size()-1; i++) {
-            string name = op->name.substr(0, op->name.length()-std::string(".ibuffer").size());
+        for (size_t i = 0; i < op->types.size() - 1; i++) {
+            string name = op->name.substr(0, op->name.length() - std::string(".ibuffer").size());
             string buffer_name = name + '.' + std::to_string(i) + ".ibuffer";
-            stream << get_indent() << print_type(op->types[i+1]) << " ";
+            stream << get_indent() << print_type(op->types[i + 1]) << " ";
             auto num_banks = op->types[0].lanes();
             auto bank_bits = op->types[0].bits();
             string bank_str;
@@ -3035,7 +3045,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Realize *op) {
                 bank_str = "bank_bits(";
                 for (int i = 0; i < int(log2(num_banks)); i++) {
                     bank_str += to_string(bank_bits + i);
-                    if (i != int(log2(num_banks)-1)) bank_str += ",";
+                    if (i != int(log2(num_banks) - 1)) bank_str += ",";
                 }
                 bank_str += ")";
             }
@@ -3043,7 +3053,7 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Realize *op) {
                    << print_name(buffer_name) << string_bound << ";\n";
         }
         print_stmt(op->body);
-    } else if (ends_with(op->name,".break")){
+    } else if (ends_with(op->name, ".break")) {
         print_stmt(op->body);
     } else {
         // We have treated this case as shift regs allocates with gather_shift_regs_allocates().
@@ -3052,18 +3062,18 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Realize *op) {
     }
 }
 
-void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Provide *op){
+void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Provide *op) {
     if (ends_with(op->name, ".ibuffer")) {
         internal_assert(op->values.size() == 1);
         string id_value = print_expr(op->values[0]);
-        std::string name = op->name.substr(0, op->name.length()-std::string(".ibuffer").size());
+        std::string name = op->name.substr(0, op->name.length() - std::string(".ibuffer").size());
         std::vector<std::string> access_exprs;
-        for(size_t i = 0; i < op->args.size(); i++) {
+        for (size_t i = 0; i < op->args.size(); i++) {
             access_exprs.push_back(print_expr(op->args[i]));
         }
         string buffer_name = name + '.' + std::to_string(0) + ".ibuffer";
         stream << get_indent() << print_name(buffer_name);
-        for(size_t i = 0; i < op->args.size(); i++) {
+        for (size_t i = 0; i < op->args.size(); i++) {
             stream << "[";
             stream << access_exprs[i];
             stream << "]";
@@ -3075,14 +3085,14 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Provide *op){
         string id_value = print_expr(op->values[0]);
         std::string name = op->name;
         std::vector<std::string> access_exprs;
-        for(size_t i = 0; i < op->args.size(); i++) {
+        for (size_t i = 0; i < op->args.size(); i++) {
             access_exprs.push_back(print_expr(op->args[i]));
         }
         stream << get_indent() << print_name(name);
         // do_indent();
-        for(size_t i = 0; i < op->args.size(); i++) {
+        for (size_t i = 0; i < op->args.size(); i++) {
             if (i == op->args.size() - 1 && (temp_regs_bounds.find(name) != temp_regs_bounds.end())) {
-                internal_assert(temp_regs_bounds[name] == op->args.size() || // this last arg is indexing a vector
+                internal_assert(temp_regs_bounds[name] == op->args.size() ||     // this last arg is indexing a vector
                                 temp_regs_bounds[name] == op->args.size() - 1);  // this last arg is indexing a vector element
                 if (temp_regs_bounds[name] == op->args.size()) {
                     stream << "[";
@@ -3099,21 +3109,19 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Provide *op){
                 stream << "]";
             }
         }
-        stream << " = " << id_value ;
-        stream<< ";\n";
+        stream << " = " << id_value;
+        stream << ";\n";
         cache.clear();
-    }else if(ends_with(op->name,".break")){
-        stream<<"break;\n";
-    }
-    else {
+    } else if (ends_with(op->name, ".break")) {
+        stream << "break;\n";
+    } else {
         CodeGen_C::visit(op);
     }
 }
 
-} // namespace
+}  // namespace
 
-class RemoveDeviceDeclaration : public IRMutator
-{
+class RemoveDeviceDeclaration : public IRMutator {
     using IRMutator::visit;
     bool in_kernel = false;
 
@@ -3138,7 +3146,7 @@ std::unique_ptr<CodeGen_GPU_Dev> new_CodeGen_OpenCL_Dev(const Target &target) {
 }
 
 Stmt standardize_ir_for_fpga_offloading(const Stmt &s, CodeGen_GPU_Dev *cg) {
-    CodeGen_OpenCL_Dev *opencl_cg = static_cast<CodeGen_OpenCL_Dev*>(cg);
+    CodeGen_OpenCL_Dev *opencl_cg = static_cast<CodeGen_OpenCL_Dev *>(cg);
     opencl_cg->print_global_data_structures_before_kernel(&s);
     opencl_cg->gather_shift_regs_allocates(&s);
 

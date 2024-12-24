@@ -18,6 +18,7 @@ enum class DeviceAPI {
     Default_GPU,
     CUDA,
     OpenCL,
+    MLIR,
     CM,
     Metal,
     Hexagon,

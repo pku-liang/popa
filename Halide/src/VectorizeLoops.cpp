@@ -2289,7 +2289,7 @@ Stmt vectorize_statement(const Stmt &stmt) {
 }  // namespace
 
 Stmt vectorize_loops(const Stmt &stmt, const Target &tgt, const map<string, Function> &env) {
-    if (tgt.has_feature(Target::Feature::IntelFPGA)) {
+    if (tgt.has_fpga_feature()) {
         // initial vectorize
         VectorizeLoops vecloops;
         Stmt s = vecloops.mutate(stmt);
