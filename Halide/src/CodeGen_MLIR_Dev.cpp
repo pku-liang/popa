@@ -167,8 +167,12 @@ void CodeGen_MLIR_Dev::add_kernel(Stmt s,
 
     auto builder = mlir::ImplicitLocOpBuilder::atBlockEnd(mlir_module.getLoc(), mlir_module.getBody());
     for (const auto &arg : args) {
-        inputs.push_back(arg.is_buffer ? mlir::MemRefType::get({1}, mlir_type_of(builder, arg.type)) :
-                                         mlir_type_of(builder, arg.type));
+        if (arg.is_buffer) {
+            int size = arg.size == 0 ? -1 : arg.size / (arg.type.bits() / 8);
+            inputs.push_back(mlir::MemRefType::get({size}, mlir_type_of(builder, arg.type)));
+        } else {
+            inputs.push_back(mlir_type_of(builder, arg.type));
+        }
     }
     mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
     mlir::func::FuncOp functionOp = builder.create<mlir::func::FuncOp>(builder.getStringAttr(name),
@@ -542,7 +546,7 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const ProducerConsumer *op) {
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
     if (ends_with(op->name, ".run_on_device")) {
         codegen(op->body);
-        return; 
+        return;
     }
     mlir::Value min = codegen(op->min);
     mlir::Value max = builder.create<mlir::arith::AddIOp>(min, codegen(op->extent));
@@ -558,6 +562,9 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
         mlir::Value i = forOp.getInductionVar();
         sym_push(op->name, builder.create<mlir::arith::IndexCastOp>(max.getType(), i));
         codegen(op->body);
+        if (op->for_type == ForType::Pipelined) {
+            forOp->setAttr("pipeline", builder.getBoolAttr(1));
+        }
         sym_pop(op->name);
     }
 }

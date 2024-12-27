@@ -1732,6 +1732,11 @@ Stage &Stage::unroll(const VarOrRVar &var) {
     return *this;
 }
 
+Stage &Stage::pipeline(const VarOrRVar &var) {
+    set_dim_type(var, ForType::Pipelined);
+    return *this;
+}
+
 Stage &Stage::parallel(const VarOrRVar &var, const Expr &factor, TailStrategy tail) {
     if (var.is_rvar) {
         RVar tmp;
@@ -2588,6 +2593,12 @@ Func &Func::vectorize(VarOrRVar var) {
 Func &Func::unroll(const VarOrRVar &var) {
     invalidate_cache();
     Stage(func, func.definition(), 0).unroll(var);
+    return *this;
+}
+
+Func &Func::pipeline(const VarOrRVar &var) {
+    invalidate_cache();
+    Stage(func, func.definition(), 0).pipeline(var);
     return *this;
 }
 

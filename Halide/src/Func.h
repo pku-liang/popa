@@ -394,6 +394,7 @@ public:
     Stage &parallel(const VarOrRVar &var, const Expr &task_size, TailStrategy tail = TailStrategy::Auto);
     Stage &vectorize(const VarOrRVar &var, const Expr &factor, TailStrategy tail = TailStrategy::Auto);
     Stage &unroll(const VarOrRVar &var, const Expr &factor, TailStrategy tail = TailStrategy::Auto);
+    Stage &pipeline(const VarOrRVar &var);
     Stage &partition(const VarOrRVar &var, Partition partition_policy);
     Stage &never_partition_all();
     Stage &never_partition(const std::vector<VarOrRVar> &vars);
@@ -1572,6 +1573,8 @@ public:
      * some constant factor. After this call, var refers to the outer
      * dimension of the split. 'factor' must be an integer. */
     Func &unroll(const VarOrRVar &var, const Expr &factor, TailStrategy tail = TailStrategy::Auto);
+
+    Func &pipeline(const VarOrRVar &var);
 
     /** Set the loop partition policy. Loop partitioning can be useful to
      * optimize boundary conditions (such as clamp_edge). Loop partitioning

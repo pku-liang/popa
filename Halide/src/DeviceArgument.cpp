@@ -23,6 +23,10 @@ std::vector<DeviceArgument> HostClosure::arguments() {
     return res;
 }
 
+HostClosure::HostClosure(const std::map<std::string, Closure::Buffer> &buf) {
+    this->buffers.insert(buf.begin(), buf.end());
+}
+
 void HostClosure::visit(const Call *op) {
     if (op->is_intrinsic(Call::image_load) ||
         op->is_intrinsic(Call::image_store)) {

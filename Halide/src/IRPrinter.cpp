@@ -386,6 +386,9 @@ ostream &operator<<(ostream &out, const ForType &type) {
     case ForType::Vectorized:
         out << "vectorized";
         break;
+    case ForType::Pipelined:
+        out << "Pipelined";
+        break;
     case ForType::Extern:
         out << "extern";
         break;

@@ -17,6 +17,7 @@
 #include "InjectHostDevBufferCopies.h"
 #include "OffloadGPULoops.h"
 #include "Util.h"
+#include "../../t2s/src/Utilities.h"
 
 namespace Halide {
 namespace Internal {
@@ -92,6 +93,8 @@ class InjectGpuOffload : public IRMutator {
 
     map<string, bool> state_needed;
 
+    std::map<string, Closure::Buffer> buffers;
+
     const Target &target;
 
     Expr get_state_var(const string &name) {
@@ -119,6 +122,36 @@ class InjectGpuOffload : public IRMutator {
 
     using IRMutator::visit;
 
+    Expr visit(const Call *op) override {
+        if (op->name == Call::buffer_init) {
+            auto var = op->args[0].as<Variable>();
+            internal_assert(var);
+            auto bits = op->args[6].as<IntImm>();
+            internal_assert(bits);
+            auto dimensions = op->args[7].as<IntImm>();
+            internal_assert(dimensions);
+            auto shape = op->args[8].as<Call>();
+            if (shape && shape->is_intrinsic(Call::make_struct)) {
+                string buf_name = remove_postfix(var->name, ".buffer");
+                auto &ref = buffers[buf_name];
+                ref.dimensions = dimensions->value;
+                size_t size = 0;
+                // Four values per dimension
+                for (int i = 0; i < 4*ref.dimensions; i += 4) {
+                    auto extent = shape->args[i + 1].as<IntImm>();
+                    if (extent) {
+                        // Constant extent
+                        size = (size == 0) ? extent->value : size * extent->value;
+                    } else {
+                        size = 0;
+                    }
+                }
+                ref.size = size * (bits->value / 8);
+            }
+        }
+        return IRMutator::visit(op);
+    }
+
     Stmt visit(const For *loop) override {
         if (!(is_gpu(loop->for_type) || ends_with(loop->name, ".run_on_device"))) {
             return IRMutator::visit(loop);
@@ -141,7 +174,7 @@ class InjectGpuOffload : public IRMutator {
                  << bounds.num_blocks[2] << ") blocks\n";
 
         // compute a closure over the state passed into the kernel
-        HostClosure c;
+        HostClosure c(buffers);
         c.include(loop->body, loop->name);
 
         // Determine the arguments that must be passed into the halide function

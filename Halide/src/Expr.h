@@ -421,6 +421,7 @@ enum class ForType {
     Unrolled,
     PragmaUnrolled,
     DelayUnroll,
+    Pipelined,
     Extern,
     GPUBlock,
     GPUThread,
