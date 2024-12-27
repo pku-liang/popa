@@ -96,8 +96,6 @@ class HostClosure : public Closure {
 public:
     HostClosure() = default;
 
-    HostClosure(const std::map<std::string, Closure::Buffer> &buf);
-
     /** Get a description of the captured arguments. */
     std::vector<DeviceArgument> arguments();
 

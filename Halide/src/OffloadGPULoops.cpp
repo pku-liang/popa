@@ -125,13 +125,12 @@ class InjectGpuOffload : public IRMutator {
     Expr visit(const Call *op) override {
         if (op->name == Call::buffer_init) {
             auto var = op->args[0].as<Variable>();
-            internal_assert(var);
             auto bits = op->args[6].as<IntImm>();
             internal_assert(bits);
             auto dimensions = op->args[7].as<IntImm>();
             internal_assert(dimensions);
             auto shape = op->args[8].as<Call>();
-            if (shape && shape->is_intrinsic(Call::make_struct)) {
+            if (var && shape && shape->is_intrinsic(Call::make_struct)) {
                 string buf_name = remove_postfix(var->name, ".buffer");
                 auto &ref = buffers[buf_name];
                 ref.dimensions = dimensions->value;
@@ -174,8 +173,15 @@ class InjectGpuOffload : public IRMutator {
                  << bounds.num_blocks[2] << ") blocks\n";
 
         // compute a closure over the state passed into the kernel
-        HostClosure c(buffers);
+        HostClosure c;
         c.include(loop->body, loop->name);
+        for (auto b : buffers) {
+            auto c_buf = c.buffers.find(b.first);
+            if (c_buf != c.buffers.end()) {
+                c_buf->second.dimensions = b.second.dimensions;
+                c_buf->second.size = b.second.size;
+            }
+        }
 
         // Determine the arguments that must be passed into the halide function
         vector<DeviceArgument> closure_args = c.arguments();
