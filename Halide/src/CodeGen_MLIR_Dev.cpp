@@ -598,9 +598,9 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Allocate *op) {
     mlir::MemRefType type = mlir::MemRefType::get({size}, mlir_type_of(op->type));
     mlir::memref::AllocOp alloc = builder.create<mlir::memref::AllocOp>(type);
 
-    sym_push(op->name, alloc);
+    sym_push(op->name + ".buffer", alloc);
     codegen(op->body);
-    sym_pop(op->name);
+    sym_pop(op->name + ".buffer");
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Free *op) {
