@@ -12,6 +12,7 @@
 #include "CodeGen_MLIR_Dev.h"
 #include "IROperator.h"
 #include "Module.h"
+#include "Simplify.h"
 
 namespace Halide {
 namespace Internal {
@@ -131,6 +132,8 @@ protected:
         mlir::ImplicitLocOpBuilder &builder;
         mlir::Value value;
         Scope<mlir::Value> symbol_table;
+        // For those symbols added during processing
+        std::vector<std::string> symbol_recorder;
     };
 
     const Target &target;
@@ -254,13 +257,23 @@ void CodeGen_MLIR_Dev::MLIRBuilder::codegen(const Stmt &s) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const IntImm *op) {
-    mlir::Type type = mlir_type_of(op->type);
-    value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
+    std::string symbol_name = "c" + std::to_string(op->value) + "_i32";
+    if (!(value = sym_get(symbol_name, false))) {
+        mlir::Type type = mlir_type_of(op->type);
+        value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
+        sym_push(symbol_name, value);
+        symbol_recorder.push_back(symbol_name);
+    }
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const UIntImm *op) {
-    mlir::Type type = mlir_type_of(op->type);
-    value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
+    std::string symbol_name = "c" + std::to_string(op->value) + "_i32";
+    if (!(value = sym_get(symbol_name, false))) {
+        mlir::Type type = mlir_type_of(op->type);
+        value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
+        sym_push(symbol_name, value);
+        symbol_recorder.push_back(symbol_name);
+    }
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const FloatImm *op) {
@@ -548,11 +561,36 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
         codegen(op->body);
         return;
     }
-    mlir::Value min = codegen(op->min);
-    mlir::Value max = builder.create<mlir::arith::AddIOp>(min, codegen(op->extent));
-    mlir::Value lb = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), min);
-    mlir::Value ub = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), max);
-    mlir::Value step = builder.create<mlir::arith::ConstantIndexOp>(1);
+    int prev_syms = symbol_recorder.size();
+    mlir::Value lb, ub, step;
+    if (is_const(op->min)) {
+        auto min_value = *as_const_int(op->min);
+        std::string sym_name = "c" + std::to_string(min_value);
+        if (!(lb = sym_get(sym_name, false))) {
+            lb = builder.create<mlir::arith::ConstantIndexOp>(min_value);
+            sym_push(sym_name, lb);
+            symbol_recorder.push_back(sym_name);
+        }
+    } else {
+        builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), codegen(op->min));
+    }
+    Expr max = simplify(op->min + op->extent);
+    if (is_const(max)) {
+        auto max_value = *as_const_int(max);
+        std::string sym_name = "c" + std::to_string(max_value);
+        if (!(ub = sym_get(sym_name, false))) {
+            ub = builder.create<mlir::arith::ConstantIndexOp>(max_value);
+            sym_push(sym_name, ub);
+            symbol_recorder.push_back(sym_name);
+        }
+    } else {
+        ub = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), codegen(max));
+    }
+    if (!(step = sym_get("c1", false))) {
+        step = builder.create<mlir::arith::ConstantIndexOp>(1);
+        sym_push("c1", step);
+        symbol_recorder.push_back("c1");
+    }
 
     mlir::scf::ForOp forOp = builder.create<mlir::scf::ForOp>(lb, ub, step);
     {
@@ -560,12 +598,16 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
         builder.setInsertionPointToStart(forOp.getBody());
 
         mlir::Value i = forOp.getInductionVar();
-        sym_push(op->name, builder.create<mlir::arith::IndexCastOp>(max.getType(), i));
+        sym_push(op->name, builder.create<mlir::arith::IndexCastOp>(mlir_type_of(max.type()), i));
         codegen(op->body);
         if (op->for_type == ForType::Pipelined) {
             forOp->setAttr("pipeline", builder.getBoolAttr(1));
         }
         sym_pop(op->name);
+        for (int i = symbol_recorder.size()-1; i >= prev_syms; i--) {
+            sym_pop(symbol_recorder.back());
+            symbol_recorder.pop_back();
+        }
     }
 }
 
