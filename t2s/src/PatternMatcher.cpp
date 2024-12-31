@@ -181,15 +181,15 @@ public:
             allocs.clear();
         }
         // Breaks up dot-8 and larger into dot-4s using fpga_reg
-        for (auto it = inner_products.begin(); it != inner_products.end(); ++it) {
-            if (it->sink_loop != op->name) continue;
-            Expr tmp = Call::make(it->type, it->name, {}, Call::Intrinsic);
-            Expr fpga_reg = Call::make(it->type, Call::IntrinsicOp::fpga_reg, {tmp, 1}, Call::CallType::PureIntrinsic);
-            Stmt tmp_self = Provide::make(it->name, { fpga_reg }, {});
-            Expr cond = Variable::make(Int(32), op->name) % 4 == 3;
-            Stmt if_stmt = IfThenElse::make(cond, tmp_self);
-            body = Block::make(body, if_stmt);
-        }
+        // for (auto it = inner_products.begin(); it != inner_products.end(); ++it) {
+        //     if (it->sink_loop != op->name) continue;
+        //     Expr tmp = Call::make(it->type, it->name, {}, Call::Intrinsic);
+        //     Expr fpga_reg = Call::make(it->type, Call::IntrinsicOp::fpga_reg, {tmp, 1}, Call::CallType::PureIntrinsic);
+        //     Stmt tmp_self = Provide::make(it->name, { fpga_reg }, {});
+        //     Expr cond = Variable::make(Int(32), op->name) % 4 == 3;
+        //     Stmt if_stmt = IfThenElse::make(cond, tmp_self);
+        //     body = Block::make(body, if_stmt);
+        // }
         body = For::make(op->name, op->min, op->extent,
                          op->for_type, op->device_api, body);
         for (auto it = inner_products.begin(); it != inner_products.end(); ) {

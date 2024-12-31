@@ -181,9 +181,9 @@ void reorder_gpu_loops(Func func, int &num_gpu_vars) {
     }
 }
 
-void annotate_loop_type(Func func) {
+void convert_unrolled_to_vectorized_loop(Func func) {
     if (func.function().definition().schedule().has_stt()) {
-        // We annotate space loops as unrolled when invoking unscheduled stt, since
+        // We annotate space loops as unrolled when performing unscheduled stt since
         // the target platform is unknown at that time. But the innermost space loop
         // should be vectorized while others should be serial on GPUs (loops involved
         // in memory address can be automatically unrolled in a later stage).
@@ -193,6 +193,20 @@ void annotate_loop_type(Func func) {
             func.vectorize(Var(src_vars[0]));
             for (size_t i = 1; i < src_vars.size(); i++) {
                 func.serial(Var(src_vars[i]));
+            }
+        }
+    }
+}
+
+void annotate_pipelined_loop(Func func) {
+    if (func.function().has_merged_defs()) {
+        // We find the innermost serial loop and annotate that loop to
+        // be pipelined, which facilitates low-level code generation.
+        auto func_dims = func.function().definition().schedule().dims();
+        for (auto &d : func_dims) {
+            if (d.for_type == ForType::Serial) {
+                func.pipeline(Var(d.var));
+                break;
             }
         }
     }
@@ -208,11 +222,15 @@ void t2s_preprocess_before_lower(map<string, Func> &env, const Target &target) {
         // calls of the function, later we will fix their args corresponding to the loops.
         convert_removed_loops_to_unit_loops(func);
 
-        // GPU-related transform
-        if (target.has_feature(Target::IntelGPU)) {
+        // GPU-specific transforms
+        if (target.has_gpu_feature()) {
             int num_gpu_vars = 0;
             reorder_gpu_loops(func, num_gpu_vars);
-            annotate_loop_type(func);
+            convert_unrolled_to_vectorized_loop(func);
+        }
+        // FPGA-specific transforms
+        if (target.has_fpga_feature()) {
+            annotate_pipelined_loop(func);
         }
         // Space-time transform
         func.apply_same_loop_transform_to_merged_ures();

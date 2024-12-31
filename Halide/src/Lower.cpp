@@ -556,15 +556,15 @@ void lower_impl(const vector<Function> &output_funcs,
     debug(1) << "Simplifying...\n";
     s = common_subexpression_elimination(s);
 
-    debug(1) << "Matching compute patterns...\n";
-    s = match_patterns(s);
-    log("Lowering after matching patterns:", s);
+    // debug(1) << "Matching compute patterns...\n";
+    // s = match_patterns(s);
+    // log("Lowering after matching patterns:", s);
 
-    if (t.has_fpga_feature()) {
-        debug(1) << "Inserting FPGA register calls\n";
-        s = insert_fpga_reg(s, env);
-        log("Lowering after inserting FPGA register calls:", s);
-    }
+    // if (t.has_fpga_feature()) {
+    //     debug(1) << "Inserting FPGA register calls\n";
+    //     s = insert_fpga_reg(s, env);
+    //     log("Lowering after inserting FPGA register calls:", s);
+    // }
 
     debug(1) << "Lowering unsafe promises...\n";
     s = lower_unsafe_promises(s, t);
@@ -612,12 +612,12 @@ void lower_impl(const vector<Function> &output_funcs,
     log("Lowering after channel promotion:", s);
 
     // For overlay, we don't need to flatten task loops.
-    char *overlay_num = getenv("HL_OVERLAY_NUM");
-    if (t.has_fpga_feature() && overlay_num == NULL) {
-        debug(1) << "Flatten the loops...\n";
-        s = simplify(flatten_loops(s, env));
-        log("Lowering after loop flattening:", s);
-    }
+    // char *overlay_num = getenv("HL_OVERLAY_NUM");
+    // if (t.has_fpga_feature() && overlay_num == NULL) {
+    //     debug(1) << "Flatten the loops...\n";
+    //     s = simplify(flatten_loops(s, env));
+    //     log("Lowering after loop flattening:", s);
+    // }
 
     debug(1) << "Flatten triangular loop...\n";
     s = flatten_tirangualr_loop_nest(s, env);

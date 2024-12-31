@@ -97,7 +97,7 @@ Func &Func::space_time_transform(const vector<Var> &vars, SpaceTimeTransform che
     // shift registers. We will minimize the shift registers after replace_references_with_shift_registers() in Lower.cpp.
     // We cannot easily do it during apply_space_time_transform() because we may need to linearize several groups of
     // loops separately, and that makes the shift register indices as linear expressions of loop vars, not necessarily
-    // within the bounds of the loops, and that may break bound inference later. So we wil delay the minimization of
+    // within the bounds of the loops, and that may break bound inference later. So we will delay the minimization of
     // shift registers after bound inference is no longer needed.
     for (auto v: vars) {
         unroll(v);

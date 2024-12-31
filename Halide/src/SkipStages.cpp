@@ -148,7 +148,8 @@ class SkipStagesAnalysis : public IRVisitor {
 
     Scope<> in_realize;
     void visit(const Realize *op) override {
-        if (ends_with(op->name, ".channel")) return;
+        if (ends_with(op->name, ".channel")
+            || ends_with(op->name, ".shreg")) return;
         size_t id = func_id.at(op->name);
 
         // There may have already been a Realize node for this Func. We need to

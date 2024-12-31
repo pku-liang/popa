@@ -40,14 +40,7 @@ public:
                     const std::string &name,
                     const std::vector<DeviceArgument> &args) override;
 
-    // Only for Intel FPGAs: declare compiler-generated vectors/structs, and channels,
-    // before the kernel code.
-    void print_global_data_structures_before_kernel(const Stmt *op) {
-        clc.print_global_data_structures_before_kernel(op);
-    }
-    void gather_shift_regs_allocates(const Stmt *op) {
-        clc.gather_shift_regs_allocates(op);
-    }
+    Stmt standardize_ir_for_fpga_offloading(const Stmt &s) override;
 
     /** (Re)initialize the GPU kernel module. This is separate from compile,
      * since a GPU device module will often have many kernels compiled into it
@@ -3119,39 +3112,43 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::visit(const Provide *op) {
     }
 }
 
+Stmt CodeGen_OpenCL_Dev::standardize_ir_for_fpga_offloading(const Stmt &s) {
+    clc.print_global_data_structures_before_kernel(&s);
+    clc.gather_shift_regs_allocates(&s);
+
+    class RemoveDeviceDeclaration : public IRMutator {
+        using IRMutator::visit;
+        SmallStack<std::string> kernels;
+
+    public:
+        Stmt visit(const Realize *op) override {
+            if (kernels.empty()) {
+                // Remove nodes out of the scope of kernels
+                return mutate(op->body);
+            }
+            return IRMutator::visit(op);
+        }
+
+        Stmt visit(const For *op) override {
+            if (ends_with(op->name, ".run_on_device")) {
+                kernels.push(op->name);
+            }
+            Stmt s = IRMutator::visit(op);
+            if (ends_with(op->name, ".run_on_device")) {
+                kernels.pop();
+            }
+            return s;
+        }
+    };
+    return RemoveDeviceDeclaration().mutate(s);
+}
+
 }  // namespace
-
-class RemoveDeviceDeclaration : public IRMutator {
-    using IRMutator::visit;
-    bool in_kernel = false;
-
-public:
-    Stmt visit(const Realize *op) override {
-        if (ends_with(op->name, ".channel") && !in_kernel) {
-            return mutate(op->body);
-        }
-        return IRMutator::visit(op);
-    }
-
-    Stmt visit(const For *op) override {
-        if (ends_with(op->name, "run_on_device")) {
-            in_kernel = true;
-        }
-        return IRMutator::visit(op);
-    }
-};
 
 std::unique_ptr<CodeGen_GPU_Dev> new_CodeGen_OpenCL_Dev(const Target &target) {
     return std::make_unique<CodeGen_OpenCL_Dev>(target);
 }
 
-Stmt standardize_ir_for_fpga_offloading(const Stmt &s, CodeGen_GPU_Dev *cg) {
-    CodeGen_OpenCL_Dev *opencl_cg = static_cast<CodeGen_OpenCL_Dev *>(cg);
-    opencl_cg->print_global_data_structures_before_kernel(&s);
-    opencl_cg->gather_shift_regs_allocates(&s);
-
-    return RemoveDeviceDeclaration().mutate(s);
-}
 
 }  // namespace Internal
 }  // namespace Halide

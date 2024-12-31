@@ -8,9 +8,11 @@
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/Verifier.h>
 
+#include "../../t2s/src/Utilities.h"
 #include "CodeGen_GPU_Dev.h"
 #include "CodeGen_MLIR_Dev.h"
 #include "IROperator.h"
+#include "IRMutator.h"
 #include "Module.h"
 #include "Simplify.h"
 
@@ -29,6 +31,10 @@ public:
     void add_kernel(Stmt stmt,
                     const std::string &name,
                     const std::vector<DeviceArgument> &args) override;
+
+    void gather_shift_regs_allocates(const Stmt &s);
+
+    Stmt standardize_ir_for_fpga_offloading(const Stmt &s) override;
 
     /** (Re)initialize the GPU kernel module. This is separate from compile,
      * since a GPU device module will often have many kernels compiled into it
@@ -67,7 +73,10 @@ protected:
 
     class MLIRBuilder : public IRVisitor {
     public:
-        MLIRBuilder(mlir::ImplicitLocOpBuilder &builder, const std::vector<DeviceArgument> &args);
+        using Alloc = std::map<std::string, std::pair<Type, Region>>;
+        MLIRBuilder(mlir::ImplicitLocOpBuilder &builder,
+                    const std::vector<DeviceArgument> &args,
+                    const Alloc &allocs);
 
     protected:
         mlir::Value codegen(const Expr &);
@@ -134,6 +143,8 @@ protected:
         Scope<mlir::Value> symbol_table;
         // For those symbols added during processing
         std::vector<std::string> symbol_recorder;
+        const Alloc &shift_regs_allocs;
+        bool need_index_type = false;
     };
 
     const Target &target;
@@ -141,6 +152,7 @@ protected:
     mlir::ModuleOp mlir_module;
     std::ostringstream stream;
     std::string cur_kernel_name;
+    MLIRBuilder::Alloc shift_regs_allocs;
 };
 
 CodeGen_MLIR_Dev::CodeGen_MLIR_Dev(const Target &t)
@@ -182,7 +194,7 @@ void CodeGen_MLIR_Dev::add_kernel(Stmt s,
                                                                        functionType, funcAttrs, funcArgAttrs);
     builder.setInsertionPointToStart(functionOp.addEntryBlock());
 
-    CodeGen_MLIR_Dev::MLIRBuilder visitor(builder, args);
+    CodeGen_MLIR_Dev::MLIRBuilder visitor(builder, args, shift_regs_allocs);
     s.accept(&visitor);
     builder.create<mlir::func::ReturnOp>();
 }
@@ -228,8 +240,10 @@ mlir::Type CodeGen_MLIR_Dev::mlir_type_of(mlir::ImplicitLocOpBuilder &builder, H
     return mlir::Type();
 }
 
-CodeGen_MLIR_Dev::MLIRBuilder::MLIRBuilder(mlir::ImplicitLocOpBuilder &builder, const std::vector<DeviceArgument> &args)
-    : builder(builder) {
+CodeGen_MLIR_Dev::MLIRBuilder::MLIRBuilder(mlir::ImplicitLocOpBuilder &builder,
+                                           const std::vector<DeviceArgument> &args,
+                                           const Alloc &allocs)
+    : builder(builder), shift_regs_allocs(allocs) {
 
     mlir::func::FuncOp funcOp = cast<mlir::func::FuncOp>(builder.getBlock()->getParentOp());
     for (auto [index, arg] : llvm::enumerate(args)) {
@@ -257,20 +271,22 @@ void CodeGen_MLIR_Dev::MLIRBuilder::codegen(const Stmt &s) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const IntImm *op) {
-    std::string symbol_name = "c" + std::to_string(op->value) + "_i32";
+    std::string symbol_name = "c" + std::to_string(op->value) + (need_index_type ? "" : "_i32");
     if (!(value = sym_get(symbol_name, false))) {
         mlir::Type type = mlir_type_of(op->type);
-        value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
+        value = need_index_type ? builder.create<mlir::arith::ConstantIndexOp>(op->value)
+                                : builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
         sym_push(symbol_name, value);
         symbol_recorder.push_back(symbol_name);
     }
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const UIntImm *op) {
-    std::string symbol_name = "c" + std::to_string(op->value) + "_i32";
+    std::string symbol_name = "c" + std::to_string(op->value) + (need_index_type ? "" : "_i32");
     if (!(value = sym_get(symbol_name, false))) {
         mlir::Type type = mlir_type_of(op->type);
-        value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
+        value = need_index_type ? builder.create<mlir::arith::ConstantIndexOp>(op->value)
+                                : builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
         sym_push(symbol_name, value);
         symbol_recorder.push_back(symbol_name);
     }
@@ -326,6 +342,12 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Reinterpret *op) {
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Variable *op) {
     value = sym_get(op->name, true);
+    if (!need_index_type && value.getType().isa<mlir::IndexType>()) {
+        value = builder.create<mlir::arith::IndexCastOp>(builder.getIntegerType(32), value);
+    }
+    if (need_index_type && !value.getType().isa<mlir::IndexType>()) {
+        value = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), value);
+    }
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Add *op) {
@@ -463,6 +485,7 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Load *op) {
     mlir::Value buffer = sym_get(op->name + ".buffer");
     mlir::Type type = mlir_type_of(op->type);
     mlir::Value index;
+    need_index_type = true;
     if (op->type.is_scalar()) {
         index = codegen(op->index);
     } else if (Expr ramp_base = strided_ramp_base(op->index); ramp_base.defined()) {
@@ -470,8 +493,9 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Load *op) {
     } else {
         internal_error << "Unsupported load\n";
     }
+    need_index_type = false;
 
-    index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), index);
+    // index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), index);
     if (op->type.is_scalar()) {
         value = builder.create<mlir::memref::LoadOp>(type, buffer, mlir::ValueRange{index});
     } else {
@@ -531,6 +555,29 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Call *op) {
         index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), index);
         mlir::Value dim = builder.create<mlir::memref::DimOp>(buffer, index);
         value = builder.create<mlir::arith::IndexCastOp>(type, dim);
+    } else if (op->is_intrinsic(Call::read_shift_reg)) {
+        auto name = op->args[0].as<StringImm>();
+        internal_assert(name);
+        mlir::Value buffer = sym_get(name->value);
+        mlir::SmallVector<mlir::Value> args;
+        need_index_type = true;
+        for (size_t i = 1; i < op->args.size(); i++) {
+            args.push_back(codegen(op->args[i]));
+        }
+        need_index_type = false;
+        value = builder.create<mlir::memref::LoadOp>(mlir_type_of(op->type), buffer, args);
+    } else if (op->is_intrinsic(Call::write_shift_reg)) {
+        auto name = op->args[0].as<StringImm>();
+        internal_assert(name);
+        mlir::Value buffer = sym_get(name->value);
+        mlir::SmallVector<mlir::Value> args;
+        need_index_type = true;
+        for (size_t i = 1; i < op->args.size()-1; i++) {
+            args.push_back(codegen(op->args[i]));
+        }
+        need_index_type = false;
+        mlir::Value value = codegen(op->args.back());
+        builder.create<mlir::memref::StoreOp>(value, buffer, args);
     } else {
         internal_error << "Call to " << op->name << " not implemented\n";
     }
@@ -558,50 +605,47 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const ProducerConsumer *op) {
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
     if (ends_with(op->name, ".run_on_device")) {
-        codegen(op->body);
+        std::string func_name = extract_first_token(op->name);
+        if (shift_regs_allocs.find(func_name) != shift_regs_allocs.end()) {
+            mlir::SmallVector<int64_t> shapes;
+            const Type &value_type = shift_regs_allocs.at(func_name).first;
+            const Region &bounds = shift_regs_allocs.at(func_name).second;
+            for (const auto &d : bounds) {
+                auto extent = as_const_int(d.extent);
+                internal_assert(extent);
+                shapes.push_back(*extent);
+            }
+            mlir::MemRefType type = mlir::MemRefType::get(shapes, mlir_type_of(value_type));
+            mlir::memref::AllocOp alloc = builder.create<mlir::memref::AllocOp>(type);
+
+            sym_push(func_name + ".shreg", alloc);
+            codegen(op->body);
+            sym_pop(func_name + ".shreg");
+        } else {
+            codegen(op->body);
+        }
         return;
     }
+    need_index_type = true;
+    mlir::Value lb = codegen(op->min);
+    mlir::Value ub = codegen(simplify(op->min + op->extent));
+    mlir::Value step = codegen(1);
+    need_index_type = false;
     int prev_syms = symbol_recorder.size();
-    mlir::Value lb, ub, step;
-    if (is_const(op->min)) {
-        auto min_value = *as_const_int(op->min);
-        std::string sym_name = "c" + std::to_string(min_value);
-        if (!(lb = sym_get(sym_name, false))) {
-            lb = builder.create<mlir::arith::ConstantIndexOp>(min_value);
-            sym_push(sym_name, lb);
-            symbol_recorder.push_back(sym_name);
-        }
-    } else {
-        builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), codegen(op->min));
-    }
-    Expr max = simplify(op->min + op->extent);
-    if (is_const(max)) {
-        auto max_value = *as_const_int(max);
-        std::string sym_name = "c" + std::to_string(max_value);
-        if (!(ub = sym_get(sym_name, false))) {
-            ub = builder.create<mlir::arith::ConstantIndexOp>(max_value);
-            sym_push(sym_name, ub);
-            symbol_recorder.push_back(sym_name);
-        }
-    } else {
-        ub = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), codegen(max));
-    }
-    if (!(step = sym_get("c1", false))) {
-        step = builder.create<mlir::arith::ConstantIndexOp>(1);
-        sym_push("c1", step);
-        symbol_recorder.push_back("c1");
-    }
-
     mlir::scf::ForOp forOp = builder.create<mlir::scf::ForOp>(lb, ub, step);
     {
         mlir::OpBuilder::InsertionGuard guard(builder);
         builder.setInsertionPointToStart(forOp.getBody());
 
         mlir::Value i = forOp.getInductionVar();
-        sym_push(op->name, builder.create<mlir::arith::IndexCastOp>(mlir_type_of(max.type()), i));
+        // sym_push(op->name, builder.create<mlir::arith::IndexCastOp>(mlir_type_of(max.type()), i));
+        sym_push(op->name, i);
         codegen(op->body);
         if (op->for_type == ForType::Pipelined) {
-            forOp->setAttr("pipeline", builder.getBoolAttr(1));
+            forOp->setAttr("pipeline", builder.getIntegerAttr(builder.getIntegerType(32), 1));
+        }
+        if (op->for_type == ForType::Unrolled) {
+            forOp->setAttr("unroll", builder.getIntegerAttr(builder.getIntegerType(32), 1));
         }
         sym_pop(op->name);
         for (int i = symbol_recorder.size()-1; i >= prev_syms; i--) {
@@ -615,6 +659,7 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Store *op) {
     mlir::Value buffer = sym_get(op->name + ".buffer");
     mlir::Value value = codegen(op->value);
     mlir::Value index;
+    need_index_type = true;
     if (op->value.type().is_scalar()) {
         index = codegen(op->index);
     } else if (Expr ramp_base = strided_ramp_base(op->index); ramp_base.defined()) {
@@ -622,8 +667,9 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Store *op) {
     } else {
         internal_error << "Unsupported store\n";
     }
+    need_index_type = false;
 
-    index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), index);
+    // index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), index);
     if (op->value.type().is_scalar()) {
         builder.create<mlir::memref::StoreOp>(value, buffer, mlir::ValueRange{index});
     } else {
@@ -674,12 +720,19 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Block *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const IfThenElse *op) {
-    builder.create<mlir::scf::IfOp>(
-        codegen(op->condition),
-        /*thenBuilder=*/[&](mlir::OpBuilder &b, mlir::Location) { codegen(op->then_case); },
-        /*elseBuilder=*/[&](mlir::OpBuilder &b, mlir::Location) {
-            if (op->else_case.defined())
-                codegen(op->else_case); });
+    auto then_builder = [&](mlir::OpBuilder &b, mlir::Location l) {
+        codegen(op->then_case);
+        b.create<mlir::scf::YieldOp>(l);
+    };
+    auto else_builder = [&](mlir::OpBuilder &b, mlir::Location l) {
+        codegen(op->else_case);
+        b.create<mlir::scf::YieldOp>(l);
+    };
+    if (!op->else_case.defined()) {
+        builder.create<mlir::scf::IfOp>(codegen(op->condition), then_builder);
+    } else {
+        builder.create<mlir::scf::IfOp>(codegen(op->condition), then_builder, else_builder);
+    }
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Evaluate *op) {
@@ -746,6 +799,59 @@ mlir::Value CodeGen_MLIR_Dev::MLIRBuilder::sym_get(const std::string &name, bool
         }
     }
     return symbol_table.get(name);
+}
+
+void CodeGen_MLIR_Dev::gather_shift_regs_allocates(const Stmt &s) {
+
+    class GatherShiftRegsAllocates : public IRVisitor {
+        MLIRBuilder::Alloc &shift_regs_allocs;
+        using IRVisitor::visit;
+
+    public:
+        GatherShiftRegsAllocates(MLIRBuilder::Alloc &allocs)
+            : shift_regs_allocs(allocs) {}
+
+        void visit(const Realize *op) override {
+            if (ends_with(op->name, ".shreg")) {
+                std::string func_name = extract_first_token(op->name);
+                internal_assert(op->types.size() == 1);
+                shift_regs_allocs[func_name] = { op->types[0], op->bounds };
+            }
+            return IRVisitor::visit(op);
+        }
+    };
+    GatherShiftRegsAllocates gsra(shift_regs_allocs);
+    s.accept(&gsra);
+}
+
+Stmt CodeGen_MLIR_Dev::standardize_ir_for_fpga_offloading(const Stmt &s) {
+    gather_shift_regs_allocates(s);
+
+    class RemoveDeviceDeclaration : public IRMutator {
+        using IRMutator::visit;
+        SmallStack<std::string> kernels;
+
+    public:
+        Stmt visit(const Realize *op) override {
+            if (kernels.empty()) {
+                // Remove nodes out of the scope of kernels
+                return mutate(op->body);
+            }
+            return IRMutator::visit(op);
+        }
+
+        Stmt visit(const For *op) override {
+            if (ends_with(op->name, ".run_on_device")) {
+                kernels.push(op->name);
+            }
+            Stmt s = IRMutator::visit(op);
+            if (ends_with(op->name, ".run_on_device")) {
+                kernels.pop();
+            }
+            return s;
+        }
+    };
+    return RemoveDeviceDeclaration().mutate(s);
 }
 
 }  // namespace

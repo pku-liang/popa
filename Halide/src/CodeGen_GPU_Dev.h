@@ -55,6 +55,11 @@ struct CodeGen_GPU_Dev {
         return false;
     }
 
+    virtual Stmt standardize_ir_for_fpga_offloading(const Stmt &s) {
+        internal_error << "FPGA code generator must override this function.\n";
+        return s;
+    }
+
     /** Checks if expr is block uniform, i.e. does not depend on a thread
      * var. */
     static bool is_block_uniform(const Expr &expr);

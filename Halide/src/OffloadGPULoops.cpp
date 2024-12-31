@@ -326,8 +326,11 @@ public:
         }
 
         Stmt result = s;
-        if (target.has_feature(Target::IntelFPGA)) {
-            result = standardize_ir_for_fpga_offloading(result, cgdev[DeviceAPI::OpenCL].get());
+        if (target.has_fpga_feature()) {
+            user_assert(cgdev.size() == 1);
+            for (auto &i : cgdev) {
+                result = i.second->standardize_ir_for_fpga_offloading(result);
+            }
         }
         result = mutate(result);
 

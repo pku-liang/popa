@@ -2256,7 +2256,8 @@ std::set<Internal::ForType> supported_types = {
     Internal::ForType::GPUThread,
     Internal::ForType::Unrolled,
     Internal::ForType::Vectorized,
-    Internal::ForType::Parallel
+    Internal::ForType::Parallel,
+    Internal::ForType::Pipelined
 };
 void Func::apply_same_loop_transform_to_merged_ures() {
     vector<Dim> &func_dims = func.definition().schedule().dims();
