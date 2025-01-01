@@ -28,7 +28,7 @@ set(T2S_HEADER_FILES
     ScatterAndBuffer.h
     SliceExprTree.h
     SpaceTimeTransform.h
-    StandardizeIRForOpenCL.h
+    StandardizeIR.h
     Stensor.h
     StructType.h
     TriangularLoopOptimize.h
@@ -69,7 +69,7 @@ set(T2S_SOURCE_FILES
     ScatterAndBuffer.cpp
     SliceExprTree.cpp
     SpaceTimeTransform.cpp
-    StandardizeIRForOpenCL.cpp
+    StandardizeIR.cpp
     Stensor.cpp
     StructType.cpp
     TriangularLoopOptimize.cpp

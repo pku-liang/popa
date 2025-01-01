@@ -26,7 +26,7 @@
 #include "Scope.h"
 #include "Simplify.h"
 #include "../../t2s/src/DebugPrint.h"
-#include "../../t2s/src/StandardizeIRForOpenCL.h"
+#include "../../t2s/src/StandardizeIR.h"
 #include "../../t2s/src/Utilities.h"
 
 #include <map>

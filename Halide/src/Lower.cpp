@@ -103,7 +103,7 @@
 #include "../../t2s/src/RemoveDeadDimensions.h"
 #include "../../t2s/src/ScatterAndBuffer.h"
 #include "../../t2s/src/SpaceTimeTransform.h"
-#include "../../t2s/src/StandardizeIRForOpenCL.h"
+#include "../../t2s/src/StandardizeIR.h"
 #include "../../t2s/src/TriangularLoopOptimize.h"
 
 namespace Halide {

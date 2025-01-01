@@ -8,6 +8,7 @@
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/Verifier.h>
 
+#include "../../t2s/src/StandardizeIR.h"
 #include "../../t2s/src/Utilities.h"
 #include "CodeGen_GPU_Dev.h"
 #include "CodeGen_MLIR_Dev.h"
@@ -71,12 +72,28 @@ protected:
 
     static mlir::Type mlir_type_of(mlir::ImplicitLocOpBuilder &builder, Halide::Type t);
 
+    class GatherShiftRegsAllocates : public IRVisitor {
+        using IRVisitor::visit;
+        std::set<std::string> space_loops;
+
+    public:
+        struct RegAlloc {
+            Type type;
+            Region bounds;
+            std::set<int> space_dims;
+        };
+        std::map<std::string, RegAlloc> func_to_regalloc;
+
+        void visit(const For *op) override;
+        void visit(const Call *op) override;
+        void visit(const Realize *op) override;
+    };
+
     class MLIRBuilder : public IRVisitor {
     public:
-        using Alloc = std::map<std::string, std::pair<Type, Region>>;
         MLIRBuilder(mlir::ImplicitLocOpBuilder &builder,
                     const std::vector<DeviceArgument> &args,
-                    const Alloc &allocs);
+                    const GatherShiftRegsAllocates &gather_reg_allocs);
 
     protected:
         mlir::Value codegen(const Expr &);
@@ -143,7 +160,7 @@ protected:
         Scope<mlir::Value> symbol_table;
         // For those symbols added during processing
         std::vector<std::string> symbol_recorder;
-        const Alloc &shift_regs_allocs;
+        const GatherShiftRegsAllocates &gather_reg_allocs;
         bool need_index_type = false;
     };
 
@@ -152,7 +169,7 @@ protected:
     mlir::ModuleOp mlir_module;
     std::ostringstream stream;
     std::string cur_kernel_name;
-    MLIRBuilder::Alloc shift_regs_allocs;
+    GatherShiftRegsAllocates gather_reg_allocs;
 };
 
 CodeGen_MLIR_Dev::CodeGen_MLIR_Dev(const Target &t)
@@ -194,7 +211,7 @@ void CodeGen_MLIR_Dev::add_kernel(Stmt s,
                                                                        functionType, funcAttrs, funcArgAttrs);
     builder.setInsertionPointToStart(functionOp.addEntryBlock());
 
-    CodeGen_MLIR_Dev::MLIRBuilder visitor(builder, args, shift_regs_allocs);
+    CodeGen_MLIR_Dev::MLIRBuilder visitor(builder, args, gather_reg_allocs);
     s.accept(&visitor);
     builder.create<mlir::func::ReturnOp>();
 }
@@ -242,8 +259,8 @@ mlir::Type CodeGen_MLIR_Dev::mlir_type_of(mlir::ImplicitLocOpBuilder &builder, H
 
 CodeGen_MLIR_Dev::MLIRBuilder::MLIRBuilder(mlir::ImplicitLocOpBuilder &builder,
                                            const std::vector<DeviceArgument> &args,
-                                           const Alloc &allocs)
-    : builder(builder), shift_regs_allocs(allocs) {
+                                           const GatherShiftRegsAllocates &ga)
+    : builder(builder), gather_reg_allocs(ga) {
 
     mlir::func::FuncOp funcOp = cast<mlir::func::FuncOp>(builder.getBlock()->getParentOp());
     for (auto [index, arg] : llvm::enumerate(args)) {
@@ -606,21 +623,33 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const ProducerConsumer *op) {
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
     if (ends_with(op->name, ".run_on_device")) {
         std::string func_name = extract_first_token(op->name);
-        if (shift_regs_allocs.find(func_name) != shift_regs_allocs.end()) {
+        const auto &func_to_regalloc = gather_reg_allocs.func_to_regalloc;
+        if (func_to_regalloc.find(func_name) != func_to_regalloc.end()) {
+            const auto &regalloc = func_to_regalloc.at(func_name);
             mlir::SmallVector<int64_t> shapes;
-            const Type &value_type = shift_regs_allocs.at(func_name).first;
-            const Region &bounds = shift_regs_allocs.at(func_name).second;
-            for (const auto &d : bounds) {
+            for (const auto &d : regalloc.bounds) {
                 auto extent = as_const_int(d.extent);
                 internal_assert(extent);
                 shapes.push_back(*extent);
             }
-            mlir::MemRefType type = mlir::MemRefType::get(shapes, mlir_type_of(value_type));
+            mlir::MemRefType type = mlir::MemRefType::get(shapes, mlir_type_of(regalloc.type));
             mlir::memref::AllocOp alloc = builder.create<mlir::memref::AllocOp>(type);
+            std::string reg_name = func_name + ".shreg";
 
-            sym_push(func_name + ".shreg", alloc);
+            mlir::SmallVector<mlir::Attribute> cyclic, dims, factors;
+            for (auto dim : regalloc.space_dims) {
+                cyclic.push_back(builder.getIntegerAttr(builder.getI32Type(), 0));
+                dims.push_back(builder.getIntegerAttr(builder.getI32Type(), dim));
+                factors.push_back(builder.getIntegerAttr(builder.getI32Type(), shapes[dim]));
+            }
+            alloc->setAttr("var_name", builder.getStringAttr(reg_name));
+            alloc->setAttr("partition_cyclic_array", builder.getArrayAttr(cyclic));
+            alloc->setAttr("partition_dim_array", builder.getArrayAttr(dims));
+            alloc->setAttr("partition_factor_array", builder.getArrayAttr(factors));
+
+            sym_push(reg_name, alloc);
             codegen(op->body);
-            sym_pop(func_name + ".shreg");
+            sym_pop(reg_name);
         } else {
             codegen(op->body);
         }
@@ -645,7 +674,7 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
             forOp->setAttr("pipeline", builder.getIntegerAttr(builder.getIntegerType(32), 1));
         }
         if (op->for_type == ForType::Unrolled) {
-            forOp->setAttr("unroll", builder.getIntegerAttr(builder.getIntegerType(32), 1));
+            forOp->setAttr("unroll", builder.getIntegerAttr(builder.getIntegerType(32), 0));
         }
         sym_pop(op->name);
         for (int i = symbol_recorder.size()-1; i >= prev_syms; i--) {
@@ -801,56 +830,46 @@ mlir::Value CodeGen_MLIR_Dev::MLIRBuilder::sym_get(const std::string &name, bool
     return symbol_table.get(name);
 }
 
-void CodeGen_MLIR_Dev::gather_shift_regs_allocates(const Stmt &s) {
+void CodeGen_MLIR_Dev::GatherShiftRegsAllocates::visit(const Realize *op) {
+    if (ends_with(op->name, ".shreg")) {
+        std::string func = remove_postfix(op->name, ".shreg");
+        internal_assert(op->types.size() == 1);
+        func_to_regalloc[func].type = op->types[0];
+        func_to_regalloc[func].bounds = op->bounds;
+    }
+    op->body.accept(this);
+}
 
-    class GatherShiftRegsAllocates : public IRVisitor {
-        MLIRBuilder::Alloc &shift_regs_allocs;
-        using IRVisitor::visit;
+void CodeGen_MLIR_Dev::GatherShiftRegsAllocates::visit(const For *op) {
+    if (op->for_type == ForType::Unrolled) {
+        space_loops.insert(op->name);
+    }
+    op->body.accept(this);
+}
 
-    public:
-        GatherShiftRegsAllocates(MLIRBuilder::Alloc &allocs)
-            : shift_regs_allocs(allocs) {}
-
-        void visit(const Realize *op) override {
-            if (ends_with(op->name, ".shreg")) {
-                std::string func_name = extract_first_token(op->name);
-                internal_assert(op->types.size() == 1);
-                shift_regs_allocs[func_name] = { op->types[0], op->bounds };
+void CodeGen_MLIR_Dev::GatherShiftRegsAllocates::visit(const Call *op) {
+    if (op->is_intrinsic(Call::read_shift_reg)) {
+        internal_assert(op->args[0].as<StringImm>());
+        std::string reg_name = op->args[0].as<StringImm>()->value;
+        std::string func = remove_postfix(reg_name, ".shreg");
+        internal_assert(func_to_regalloc.find(func) != func_to_regalloc.end());
+        auto &alloc = func_to_regalloc[func];
+        for (size_t i = 1; i < op->args.size(); i++) {
+            auto var = op->args[i].as<Variable>();
+            if (alloc.space_dims.find(i-1) == alloc.space_dims.end()) {
+                if (var && space_loops.find(var->name) != space_loops.end()) {
+                    alloc.space_dims.insert(i-1);
+                }
             }
-            return IRVisitor::visit(op);
         }
-    };
-    GatherShiftRegsAllocates gsra(shift_regs_allocs);
-    s.accept(&gsra);
+    }
+    for (size_t i = 0; i < op->args.size(); i++) {
+        op->args[i].accept(this);
+    }
 }
 
 Stmt CodeGen_MLIR_Dev::standardize_ir_for_fpga_offloading(const Stmt &s) {
-    gather_shift_regs_allocates(s);
-
-    class RemoveDeviceDeclaration : public IRMutator {
-        using IRMutator::visit;
-        SmallStack<std::string> kernels;
-
-    public:
-        Stmt visit(const Realize *op) override {
-            if (kernels.empty()) {
-                // Remove nodes out of the scope of kernels
-                return mutate(op->body);
-            }
-            return IRMutator::visit(op);
-        }
-
-        Stmt visit(const For *op) override {
-            if (ends_with(op->name, ".run_on_device")) {
-                kernels.push(op->name);
-            }
-            Stmt s = IRMutator::visit(op);
-            if (ends_with(op->name, ".run_on_device")) {
-                kernels.pop();
-            }
-            return s;
-        }
-    };
+    s.accept(&gather_reg_allocs);
     return RemoveDeviceDeclaration().mutate(s);
 }
 

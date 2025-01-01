@@ -3,6 +3,7 @@
 #include <sstream>
 
 #include "../../t2s/src/DebugPrint.h"
+#include "../../t2s/src/StandardizeIR.h"
 #include "../../t2s/src/Utilities.h"
 #include "CSE.h"
 #include "CanonicalizeGPUVars.h"
@@ -3116,30 +3117,6 @@ Stmt CodeGen_OpenCL_Dev::standardize_ir_for_fpga_offloading(const Stmt &s) {
     clc.print_global_data_structures_before_kernel(&s);
     clc.gather_shift_regs_allocates(&s);
 
-    class RemoveDeviceDeclaration : public IRMutator {
-        using IRMutator::visit;
-        SmallStack<std::string> kernels;
-
-    public:
-        Stmt visit(const Realize *op) override {
-            if (kernels.empty()) {
-                // Remove nodes out of the scope of kernels
-                return mutate(op->body);
-            }
-            return IRMutator::visit(op);
-        }
-
-        Stmt visit(const For *op) override {
-            if (ends_with(op->name, ".run_on_device")) {
-                kernels.push(op->name);
-            }
-            Stmt s = IRMutator::visit(op);
-            if (ends_with(op->name, ".run_on_device")) {
-                kernels.pop();
-            }
-            return s;
-        }
-    };
     return RemoveDeviceDeclaration().mutate(s);
 }
 

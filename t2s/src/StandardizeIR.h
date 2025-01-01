@@ -23,7 +23,9 @@
  * Standardize the IR so that later it is straightforward to generate OpenCL code
  */
 
+#include "../../Halide/src/Scope.h"
 #include "../../Halide/src/IR.h"
+#include "../../Halide/src/IRMutator.h"
 
 namespace Halide {
 namespace Internal {
@@ -33,6 +35,34 @@ namespace Internal {
  * the code generator, but also improves code readability, as no immediate variable would be
  * blindly generated. */
 extern Stmt standardize_ir_for_opencl_code_gen(Stmt s);
+
+/* Halide isolates device code by replacing device for loops with an external call on the host.
+ * However, some device-specific constructs are declared outside the device loops. These constructs
+ * must be collected by the device codegen to ensure safe removal, thereby facilitating host codegen.*/
+class RemoveDeviceDeclaration : public IRMutator {
+    using IRMutator::visit;
+    SmallStack<std::string> kernels;
+
+public:
+    Stmt visit(const Realize *op) override {
+        if (kernels.empty()) {
+            // Remove nodes out of the scope of kernels
+            return mutate(op->body);
+        }
+        return IRMutator::visit(op);
+    }
+
+    Stmt visit(const For *op) override {
+        if (ends_with(op->name, ".run_on_device")) {
+            kernels.push(op->name);
+        }
+        Stmt s = IRMutator::visit(op);
+        if (ends_with(op->name, ".run_on_device")) {
+            kernels.pop();
+        }
+        return s;
+    }
+};
 
 }
 }
