@@ -638,7 +638,7 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
 
             mlir::SmallVector<mlir::Attribute> cyclic, dims, factors;
             for (auto dim : regalloc.space_dims) {
-                cyclic.push_back(builder.getIntegerAttr(builder.getI32Type(), 0));
+                cyclic.push_back(builder.getIntegerAttr(builder.getI32Type(), 1));
                 dims.push_back(builder.getIntegerAttr(builder.getI32Type(), dim));
                 factors.push_back(builder.getIntegerAttr(builder.getI32Type(), shapes[dim]));
             }
@@ -856,10 +856,8 @@ void CodeGen_MLIR_Dev::GatherShiftRegsAllocates::visit(const Call *op) {
         auto &alloc = func_to_regalloc[func];
         for (size_t i = 1; i < op->args.size(); i++) {
             auto var = op->args[i].as<Variable>();
-            if (alloc.space_dims.find(i-1) == alloc.space_dims.end()) {
-                if (var && space_loops.find(var->name) != space_loops.end()) {
-                    alloc.space_dims.insert(i-1);
-                }
+            if (var && space_loops.find(var->name) != space_loops.end()) {
+                alloc.space_dims.insert(i-1);
             }
         }
     }

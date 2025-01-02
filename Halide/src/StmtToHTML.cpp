@@ -1931,6 +1931,7 @@ private:
 
         // Close code block holding realize body
         print_html_element("span", "matched ClosingBrace cb-" + std::to_string(id), "}");
+        print_closing_tag("span");
 
         // Close div holding this realize
         print_closing_tag("div");
@@ -2399,8 +2400,8 @@ private:
         stream << "<div id='visualization-panes'>\n";
         stream << "<div id='resizer-preview' style='display:none;'></div>\n";
         generate_ir_pane(m);
-        generate_resize_bar(pane_count++);
-        generate_host_assembly_pane(m);
+        // generate_resize_bar(pane_count++);
+        // generate_host_assembly_pane(m);
         Buffer<> device_code_buf = m.get_device_code_buffer();
         if (device_code_buf.defined()) {
             generate_resize_bar(pane_count++);

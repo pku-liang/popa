@@ -409,12 +409,18 @@ void Pipeline::compile_to_multitarget_object_files(const std::string &filename_p
     compile_multitarget(generate_function_name(), outputs, targets, suffixes, module_producer);
 }
 
-void Pipeline::compile_to_device(const string &filename,
+void Pipeline::compile_to_device(const string &filename_prefix,
                                  const vector<Argument> &args,
                                  const string &fn_name,
                                  const Target &target) {
     Module m = compile_to_module(args, fn_name, target);
-    m.compile(single_output(filename, m, OutputFileType::device_code));
+    // m.compile(single_output(filename, m, OutputFileType::device_code));
+    auto ext = get_output_info(target);
+    std::map<OutputFileType, std::string> outputs = {
+        {OutputFileType::device_code, fn_name + ext.at(OutputFileType::device_code).extension},
+        {OutputFileType::stmt_html, filename_prefix + ext.at(OutputFileType::stmt_html).extension},
+    };
+    m.compile(outputs);
 }
 
 void Pipeline::compile_to_host(const string &filename_prefix,
