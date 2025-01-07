@@ -438,7 +438,8 @@ private:
 
         Expr value = mutate(op->values[0]);
         Expr predicate = mutate(op->predicate);
-        if (in_gpu && textures.count(op->name)) {
+        if ((in_gpu && textures.count(op->name))
+            || (target.has_feature(Target::MLIR) && output_buf.defined())) {
             Expr buffer_var =
                 Variable::make(type_of<halide_buffer_t *>(), op->name + ".buffer", output_buf);
             vector<Expr> args(2);
@@ -446,7 +447,9 @@ private:
             args[1] = buffer_var;
             for (size_t i = 0; i < op->args.size(); i++) {
                 Expr min = Variable::make(Int(32), op->name + ".min." + std::to_string(i));
+                Expr extent = Variable::make(Int(32), op->name + ".extent." + std::to_string(i));
                 args.push_back(op->args[i] - min);
+                args.push_back(extent);
             }
             args.push_back(value);
             Expr store = Call::make(value.type(), Call::image_store,
@@ -479,7 +482,8 @@ private:
 
             internal_assert(op->value_index == 0);
 
-            if (in_gpu && textures.count(op->name)) {
+            if ((in_gpu && textures.count(op->name))
+                || (target.has_feature(Target::MLIR) && op->image.defined())) {
                 ReductionDomain rdom;
                 Expr buffer_var =
                     Variable::make(type_of<halide_buffer_t *>(), op->name + ".buffer",

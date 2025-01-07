@@ -45,6 +45,7 @@ struct DeviceArgument {
     /** If is_buffer is true, this is the dimensionality of the buffer.
      * If is_buffer is false, this value is ignored (and should always be set to zero) */
     uint8_t dimensions = 0;
+    std::vector<size_t> dim_sizes;
 
     /** If this is a scalar parameter, then this is its type.
      *
@@ -77,11 +78,13 @@ struct DeviceArgument {
                    MemoryType _mem,
                    Type _type,
                    uint8_t _dimensions,
+                   const std::vector<size_t> &_dim_sizes = {},
                    size_t _size = 0)
         : name(_name),
           is_buffer(_is_buffer),
           memory_type(_mem),
           dimensions(_dimensions),
+          dim_sizes(_dim_sizes),
           type(_type),
           size(_size),
 

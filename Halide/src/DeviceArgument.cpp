@@ -1,6 +1,7 @@
 #include "DeviceArgument.h"
 #include "CodeGen_GPU_Dev.h"
 #include "IRPrinter.h"
+#include "IROperator.h"
 
 namespace Halide {
 namespace Internal {
@@ -15,7 +16,7 @@ std::vector<DeviceArgument> HostClosure::arguments() {
         res.emplace_back(v.first, false, MemoryType::Auto, v.second, 0);
     }
     for (const auto &b : buffers) {
-        DeviceArgument arg(b.first, true, b.second.memory_type, b.second.type, b.second.dimensions, b.second.size);
+        DeviceArgument arg(b.first, true, b.second.memory_type, b.second.type, b.second.dimensions, b.second.dim_sizes, b.second.size);
         arg.read = b.second.read;
         arg.write = b.second.write;
         res.push_back(arg);
@@ -51,8 +52,17 @@ void HostClosure::visit(const Call *op) {
             ref.dimensions = (op->args.size() - 2) / 2;
         } else if (op->is_intrinsic(Call::image_store)) {
             ref.write = true;
-            ref.dimensions = op->args.size() - 3;
+            ref.dimensions = (op->args.size() - 3) / 2;
         }
+        ref.size = 1;
+        for (size_t i = 0; i < ref.dimensions; i++) {
+            auto ext = op->args[i * 2 + 3];
+            internal_assert(is_const(ext));
+            size_t dim_size = *as_const_int(ext);
+            ref.dim_sizes.push_back(dim_size);
+            ref.size *= dim_size;
+        }
+        ref.size *= ref.type.bits() / 8;
 
         // The Func's name and the associated .buffer are mentioned in the
         // argument lists, but don't treat them as free variables.

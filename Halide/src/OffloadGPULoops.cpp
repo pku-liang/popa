@@ -93,8 +93,6 @@ class InjectGpuOffload : public IRMutator {
 
     map<string, bool> state_needed;
 
-    std::map<string, Closure::Buffer> buffers;
-
     const Target &target;
 
     Expr get_state_var(const string &name) {
@@ -122,35 +120,6 @@ class InjectGpuOffload : public IRMutator {
 
     using IRMutator::visit;
 
-    Expr visit(const Call *op) override {
-        if (op->name == Call::buffer_init) {
-            auto var = op->args[0].as<Variable>();
-            auto bits = op->args[6].as<IntImm>();
-            internal_assert(bits);
-            auto dimensions = op->args[7].as<IntImm>();
-            internal_assert(dimensions);
-            auto shape = op->args[8].as<Call>();
-            if (var && shape && shape->is_intrinsic(Call::make_struct)) {
-                string buf_name = remove_postfix(var->name, ".buffer");
-                auto &ref = buffers[buf_name];
-                ref.dimensions = dimensions->value;
-                size_t size = 0;
-                // Four values per dimension
-                for (int i = 0; i < 4*ref.dimensions; i += 4) {
-                    auto extent = shape->args[i + 1].as<IntImm>();
-                    if (extent) {
-                        // Constant extent
-                        size = (size == 0) ? extent->value : size * extent->value;
-                    } else {
-                        size = 0;
-                    }
-                }
-                ref.size = size * (bits->value / 8);
-            }
-        }
-        return IRMutator::visit(op);
-    }
-
     Stmt visit(const For *loop) override {
         if (!(is_gpu(loop->for_type) || ends_with(loop->name, ".run_on_device"))) {
             return IRMutator::visit(loop);
@@ -175,13 +144,6 @@ class InjectGpuOffload : public IRMutator {
         // compute a closure over the state passed into the kernel
         HostClosure c;
         c.include(loop->body, loop->name);
-        for (auto b : buffers) {
-            auto c_buf = c.buffers.find(b.first);
-            if (c_buf != c.buffers.end()) {
-                c_buf->second.dimensions = b.second.dimensions;
-                c_buf->second.size = b.second.size;
-            }
-        }
 
         // Determine the arguments that must be passed into the halide function
         vector<DeviceArgument> closure_args = c.arguments();

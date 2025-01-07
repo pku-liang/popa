@@ -199,10 +199,7 @@ void CodeGen_MLIR_Dev::add_kernel(Stmt s,
 
     auto builder = mlir::ImplicitLocOpBuilder::atBlockEnd(mlir_module.getLoc(), mlir_module.getBody());
     for (const auto &arg : args) {
-        if (arg.is_buffer) {
-            int size = arg.size == 0 ? -1 : arg.size / (arg.type.bits() / 8);
-            inputs.push_back(mlir::MemRefType::get({size}, mlir_type_of(builder, arg.type)));
-        } else {
+        if (!arg.is_buffer) {
             inputs.push_back(mlir_type_of(builder, arg.type));
         }
     }
@@ -265,7 +262,10 @@ CodeGen_MLIR_Dev::MLIRBuilder::MLIRBuilder(mlir::ImplicitLocOpBuilder &builder,
     mlir::func::FuncOp funcOp = cast<mlir::func::FuncOp>(builder.getBlock()->getParentOp());
     for (auto [index, arg] : llvm::enumerate(args)) {
         if (arg.is_buffer) {
-            sym_push(arg.name + ".buffer", funcOp.getArgument(index));
+            mlir::SmallVector<int64_t> sizes(arg.dim_sizes.begin(), arg.dim_sizes.end());
+            mlir::MemRefType type = mlir::MemRefType::get(sizes, mlir_type_of(arg.type));
+            mlir::memref::AllocOp alloc = builder.create<mlir::memref::AllocOp>(type);
+            sym_push(arg.name + ".buffer", alloc);
         } else {
             sym_push(arg.name, funcOp.getArgument(index));
         }
@@ -590,6 +590,29 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Call *op) {
         mlir::SmallVector<mlir::Value> args;
         need_index_type = true;
         for (size_t i = 1; i < op->args.size()-1; i++) {
+            args.push_back(codegen(op->args[i]));
+        }
+        need_index_type = false;
+        mlir::Value value = codegen(op->args.back());
+        builder.create<mlir::memref::StoreOp>(value, buffer, args);
+    } else if (op->is_intrinsic(Call::image_load)) {
+        auto name = op->args[0].as<StringImm>();
+        internal_assert(name);
+        mlir::Value buffer = sym_get(name->value + ".buffer");
+        mlir::SmallVector<mlir::Value> args;
+        need_index_type = true;
+        for (size_t i = 2; i < op->args.size(); i += 2) {
+            args.push_back(codegen(op->args[i]));
+        }
+        need_index_type = false;
+        value = builder.create<mlir::memref::LoadOp>(mlir_type_of(op->type), buffer, args);
+    } else if (op->is_intrinsic(Call::image_store)) {
+        auto name = op->args[0].as<StringImm>();
+        internal_assert(name);
+        mlir::Value buffer = sym_get(name->value + ".buffer");
+        mlir::SmallVector<mlir::Value> args;
+        need_index_type = true;
+        for (size_t i = 2; i < op->args.size()-1; i += 2) {
             args.push_back(codegen(op->args[i]));
         }
         need_index_type = false;

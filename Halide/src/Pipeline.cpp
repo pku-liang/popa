@@ -418,7 +418,7 @@ void Pipeline::compile_to_device(const string &filename_prefix,
     auto ext = get_output_info(target);
     std::map<OutputFileType, std::string> outputs = {
         {OutputFileType::device_code, fn_name + ext.at(OutputFileType::device_code).extension},
-        {OutputFileType::stmt_html, filename_prefix + ext.at(OutputFileType::stmt_html).extension},
+        {OutputFileType::conceptual_stmt_html, filename_prefix + ext.at(OutputFileType::stmt_html).extension},
     };
     m.compile(outputs);
 }
