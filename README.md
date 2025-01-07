@@ -15,8 +15,8 @@ git clone -b mlir https://github.com/pku-liang/popa
 
 2. Build LLVM and MLIR
 ```
-git apply --unsafe-paths --directory=llvm-project -p1 popa/mlir_link_issue.patch
 cd llvm-project
+git apply -p1 ../popa/mlir_link_issue.patch
 cmake -DCMAKE_BUILD_TYPE=Release \
         -DLLVM_ENABLE_PROJECTS="clang;lld;mlir" \
         -DLLVM_TARGETS_TO_BUILD="Native" \
