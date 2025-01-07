@@ -47,7 +47,6 @@ public:
 
         /** The dimensionality of the buffer. */
         uint8_t dimensions = 0;
-        std::vector<size_t> dim_sizes;
 
         /** The buffer is read from. */
         bool read = false;

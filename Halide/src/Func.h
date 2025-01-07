@@ -1052,7 +1052,6 @@ public:
 
     void compile_to_device(const std::string &filename,
                            const std::vector<Argument> &args,
-                           const std::string &fn_name = "",
                            const Target &target = get_target_from_environment());
 
     void compile_to_host(const std::string &filename_prefix,

@@ -377,7 +377,7 @@ void Pipeline::compile_to_lowered_stmt(const string &filename,
                                        StmtOutputFormat fmt,
                                        const Target &target) {
     Module m = compile_to_module(args, "", target);
-    m.compile(single_output(filename, m, fmt == HTML ? OutputFileType::stmt_html : OutputFileType::stmt));
+    m.compile(single_output(filename, m, fmt == HTML ? OutputFileType::conceptual_stmt_html : OutputFileType::conceptual_stmt));
 }
 
 void Pipeline::compile_to_static_library(const string &filename_prefix,
@@ -409,16 +409,14 @@ void Pipeline::compile_to_multitarget_object_files(const std::string &filename_p
     compile_multitarget(generate_function_name(), outputs, targets, suffixes, module_producer);
 }
 
-void Pipeline::compile_to_device(const string &filename_prefix,
+void Pipeline::compile_to_device(const string &filename,
                                  const vector<Argument> &args,
-                                 const string &fn_name,
                                  const Target &target) {
-    Module m = compile_to_module(args, fn_name, target);
+    Module m = compile_to_module(args, "", target);
     // m.compile(single_output(filename, m, OutputFileType::device_code));
     auto ext = get_output_info(target);
     std::map<OutputFileType, std::string> outputs = {
-        {OutputFileType::device_code, fn_name + ext.at(OutputFileType::device_code).extension},
-        {OutputFileType::conceptual_stmt_html, filename_prefix + ext.at(OutputFileType::stmt_html).extension},
+        {OutputFileType::device_code, filename}
     };
     m.compile(outputs);
 }

@@ -12,6 +12,7 @@
 #include "../../t2s/src/Utilities.h"
 #include "CodeGen_GPU_Dev.h"
 #include "CodeGen_MLIR_Dev.h"
+#include "ExprUsesVar.h"
 #include "IROperator.h"
 #include "IRMutator.h"
 #include "Module.h"
@@ -74,13 +75,14 @@ protected:
 
     class GatherShiftRegsAllocates : public IRVisitor {
         using IRVisitor::visit;
-        std::set<std::string> space_loops;
+        std::map<std::string, int> space_loops;
 
     public:
         struct RegAlloc {
             Type type;
-            Region bounds;
-            std::set<int> space_dims;
+            std::vector<int> shapes;
+            std::vector<int> factors;
+            std::vector<int> space_dims;
         };
         std::map<std::string, RegAlloc> func_to_regalloc;
 
@@ -262,10 +264,25 @@ CodeGen_MLIR_Dev::MLIRBuilder::MLIRBuilder(mlir::ImplicitLocOpBuilder &builder,
     mlir::func::FuncOp funcOp = cast<mlir::func::FuncOp>(builder.getBlock()->getParentOp());
     for (auto [index, arg] : llvm::enumerate(args)) {
         if (arg.is_buffer) {
-            mlir::SmallVector<int64_t> sizes(arg.dim_sizes.begin(), arg.dim_sizes.end());
-            mlir::MemRefType type = mlir::MemRefType::get(sizes, mlir_type_of(arg.type));
+            std::string func = arg.name + ".buffer";
+            const auto &regalloc = ga.func_to_regalloc.at(func);
+            mlir::SmallVector<int64_t> shapes(regalloc.shapes.begin(), regalloc.shapes.end());
+            mlir::MemRefType type = mlir::MemRefType::get(shapes, mlir_type_of(arg.type));
             mlir::memref::AllocOp alloc = builder.create<mlir::memref::AllocOp>(type);
-            sym_push(arg.name + ".buffer", alloc);
+
+            mlir::SmallVector<mlir::Attribute> cyclic, dims, factors;
+            for (size_t i = 0; i < regalloc.space_dims.size(); i++) {
+                cyclic.push_back(builder.getIntegerAttr(builder.getI32Type(), 1));
+                dims.push_back(builder.getIntegerAttr(builder.getI32Type(), regalloc.space_dims[i]));
+                factors.push_back(builder.getIntegerAttr(builder.getI32Type(), regalloc.factors[i]));
+            }
+            alloc->setAttr("var_name", builder.getStringAttr(func));
+            if (!cyclic.empty()) {
+                alloc->setAttr("partition_cyclic_array", builder.getArrayAttr(cyclic));
+                alloc->setAttr("partition_dim_array", builder.getArrayAttr(dims));
+                alloc->setAttr("partition_factor_array", builder.getArrayAttr(factors));
+            }
+            sym_push(func, alloc);
         } else {
             sym_push(arg.name, funcOp.getArgument(index));
         }
@@ -649,30 +666,26 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
         const auto &func_to_regalloc = gather_reg_allocs.func_to_regalloc;
         if (func_to_regalloc.find(func_name) != func_to_regalloc.end()) {
             const auto &regalloc = func_to_regalloc.at(func_name);
-            mlir::SmallVector<int64_t> shapes;
-            for (const auto &d : regalloc.bounds) {
-                auto extent = as_const_int(d.extent);
-                internal_assert(extent);
-                shapes.push_back(*extent);
-            }
+            mlir::SmallVector<int64_t> shapes(regalloc.shapes.begin(), regalloc.shapes.end());
             mlir::MemRefType type = mlir::MemRefType::get(shapes, mlir_type_of(regalloc.type));
             mlir::memref::AllocOp alloc = builder.create<mlir::memref::AllocOp>(type);
-            std::string reg_name = func_name + ".shreg";
 
             mlir::SmallVector<mlir::Attribute> cyclic, dims, factors;
-            for (auto dim : regalloc.space_dims) {
+            for (size_t i = 0; i < regalloc.space_dims.size(); i++) {
                 cyclic.push_back(builder.getIntegerAttr(builder.getI32Type(), 1));
-                dims.push_back(builder.getIntegerAttr(builder.getI32Type(), dim));
-                factors.push_back(builder.getIntegerAttr(builder.getI32Type(), shapes[dim]));
+                dims.push_back(builder.getIntegerAttr(builder.getI32Type(), regalloc.space_dims[i]));
+                factors.push_back(builder.getIntegerAttr(builder.getI32Type(), regalloc.factors[i]));
             }
-            alloc->setAttr("var_name", builder.getStringAttr(reg_name));
-            alloc->setAttr("partition_cyclic_array", builder.getArrayAttr(cyclic));
-            alloc->setAttr("partition_dim_array", builder.getArrayAttr(dims));
-            alloc->setAttr("partition_factor_array", builder.getArrayAttr(factors));
-
-            sym_push(reg_name, alloc);
+            std::string var_name = func_name + ".shreg";
+            alloc->setAttr("var_name", builder.getStringAttr(var_name));
+            if (!cyclic.empty()) {
+                alloc->setAttr("partition_cyclic_array", builder.getArrayAttr(cyclic));
+                alloc->setAttr("partition_dim_array", builder.getArrayAttr(dims));
+                alloc->setAttr("partition_factor_array", builder.getArrayAttr(factors));
+            }
+            sym_push(var_name, alloc);
             codegen(op->body);
-            sym_pop(reg_name);
+            sym_pop(var_name);
         } else {
             codegen(op->body);
         }
@@ -858,34 +871,62 @@ void CodeGen_MLIR_Dev::GatherShiftRegsAllocates::visit(const Realize *op) {
         std::string func = remove_postfix(op->name, ".shreg");
         internal_assert(op->types.size() == 1);
         func_to_regalloc[func].type = op->types[0];
-        func_to_regalloc[func].bounds = op->bounds;
+        auto &shapes = func_to_regalloc[func].shapes;
+        for (auto b : op->bounds) {
+            internal_assert(is_const(b.extent));
+            shapes.push_back(*as_const_int(b.extent));
+        }
     }
     op->body.accept(this);
 }
 
 void CodeGen_MLIR_Dev::GatherShiftRegsAllocates::visit(const For *op) {
     if (op->for_type == ForType::Unrolled) {
-        space_loops.insert(op->name);
+        user_assert(is_const(op->extent))
+            << "Unrolled loop " << op->name << " must have a constant bound.\n";
+        space_loops[op->name] = *as_const_int(op->extent);
     }
     op->body.accept(this);
 }
 
 void CodeGen_MLIR_Dev::GatherShiftRegsAllocates::visit(const Call *op) {
-    if (op->is_intrinsic(Call::read_shift_reg)) {
+    for (size_t i = 0; i < op->args.size(); i++) {
+        op->args[i].accept(this);
+    }
+    if (op->is_intrinsic(Call::write_shift_reg)) {
         internal_assert(op->args[0].as<StringImm>());
-        std::string reg_name = op->args[0].as<StringImm>()->value;
-        std::string func = remove_postfix(reg_name, ".shreg");
+        std::string var_name = op->args[0].as<StringImm>()->value;
+        std::string func = remove_postfix(var_name, ".shreg");
+        // This alloc is collected when visiting Realize node
         internal_assert(func_to_regalloc.find(func) != func_to_regalloc.end());
         auto &alloc = func_to_regalloc[func];
-        for (size_t i = 1; i < op->args.size(); i++) {
+        for (size_t i = 1; i < op->args.size()-1; i++) {
             auto var = op->args[i].as<Variable>();
             if (var && space_loops.find(var->name) != space_loops.end()) {
-                alloc.space_dims.insert(i-1);
+                alloc.space_dims.push_back(i-1);
+                alloc.factors.push_back(space_loops[var->name]);
             }
         }
     }
-    for (size_t i = 0; i < op->args.size(); i++) {
-        op->args[i].accept(this);
+    if (op->is_intrinsic(Call::image_load) || op->is_intrinsic(Call::image_store)) {
+        internal_assert(op->args[0].as<StringImm>());
+        std::string func = op->args[0].as<StringImm>()->value + ".buffer";
+        // Load from or store into an external buffer only once
+        internal_assert(func_to_regalloc.find(func) == func_to_regalloc.end());
+        auto &alloc = func_to_regalloc[func];
+        alloc.type = op->type;
+        int num_dims = (op->args.size() - 2) / 2;
+        for (int i = 0; i < num_dims; i++) {
+            internal_assert(is_const(op->args[i*2 + 3]));
+            alloc.shapes.push_back(*as_const_int(op->args[i*2 + 3]));
+            // If any space loop appears in this dimension, it must be partitioned
+            auto space_it = std::find_if(space_loops.begin(), space_loops.end(),
+                                        [&](const auto &kv){ return expr_uses_var(op->args[i*2 + 2], kv.first); });
+            if (space_it != space_loops.end()) {
+                alloc.space_dims.push_back(i);
+                alloc.factors.push_back(space_it->second);
+            }
+        }
     }
 }
 

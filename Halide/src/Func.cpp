@@ -3900,9 +3900,10 @@ void Func::print_loop_nest() {
     pipeline().print_loop_nest();
 }
 
-void Func::compile_to_device(const string &filename, const vector<Argument> &args,
-                             const string &fn_name, const Target &target) {
-    pipeline().compile_to_device(filename, args, fn_name, target);
+void Func::compile_to_device(const string &filename,
+                             const vector<Argument> &args,
+                             const Target &target) {
+    pipeline().compile_to_device(filename, args, target);
 }
 
 void Func::compile_to_host(const string &filename_prefix, const vector<Argument> &args,

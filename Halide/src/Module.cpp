@@ -31,7 +31,6 @@ std::map<OutputFileType, const OutputInfo> get_output_info(const Target &target)
     constexpr bool IsMulti = true;
     constexpr bool IsSingle = false;
     const bool is_windows_coff = target.os == Target::Windows;
-    const bool is_mlir = target.has_feature(Target::MLIR);
     std::map<OutputFileType, const OutputInfo> ext = {
         {OutputFileType::assembly, {"assembly", ".s", IsMulti}},
         {OutputFileType::bitcode, {"bitcode", ".bc", IsMulti}},
@@ -53,7 +52,7 @@ std::map<OutputFileType, const OutputInfo> get_output_info(const Target &target)
         {OutputFileType::conceptual_stmt, {"conceptual_stmt", ".conceptual.stmt", IsMulti}},
         {OutputFileType::stmt_html, {"stmt_html", ".stmt.html", IsMulti}},
         {OutputFileType::conceptual_stmt_html, {"conceptual_stmt_html", ".conceptual.stmt.html", IsMulti}},
-        {OutputFileType::device_code, {"device_code", is_mlir ? ".mlir" : ".device_code", IsMulti}},
+        {OutputFileType::device_code, {"device_code", ".device_code", IsMulti}},
         {OutputFileType::host_header, {"host_header", ".h", IsSingle}},
         {OutputFileType::host_src, {"host_src", ".cpp", IsSingle}},
     };
