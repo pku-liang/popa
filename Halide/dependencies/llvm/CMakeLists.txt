@@ -167,7 +167,7 @@ else ()
                            $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-fno-rtti>)
 endif ()
 
-option(Halide_ENABLE_EXCEPTIONS "Enable exceptions" ON)
+option(Halide_ENABLE_EXCEPTIONS "Enable exceptions" OFF)
 if (Halide_ENABLE_EXCEPTIONS)
     message(STATUS "Compiling Halide WITH exceptions.")
     target_compile_definitions(Halide_LanguageOptions INTERFACE HALIDE_WITH_EXCEPTIONS)
@@ -195,10 +195,12 @@ if (MLIR_FOUND)
     target_link_libraries(Halide_LLVM INTERFACE
         MLIRAnalysis
         MLIRIR
+        MLIRAffineDialect
         MLIRArithDialect
         MLIRFuncDialect
         MLIRMemRefDialect
         MLIRSCFDialect
         MLIRVectorDialect
+        MLIRTransforms
     )
 endif ()

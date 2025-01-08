@@ -1,5 +1,6 @@
 #include <llvm/Support/raw_os_ostream.h>
 
+#include <mlir/Dialect/Affine/IR/AffineOps.h>
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
@@ -7,6 +8,8 @@
 #include <mlir/Dialect/Vector/IR/VectorOps.h>
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/Verifier.h>
+#include <mlir/Pass/PassManager.h>
+#include <mlir/Transforms/Passes.h>
 
 #include "../../t2s/src/StandardizeIR.h"
 #include "../../t2s/src/Utilities.h"
@@ -99,6 +102,9 @@ protected:
 
     protected:
         mlir::Value codegen(const Expr &);
+        mlir::Value index_codegen(const Expr &);
+        mlir::AffineExpr affine_codegen(const Expr &);
+        mlir::Value get_affine_index(const Expr &);
         void codegen(const Stmt &);
 
         void visit(const IntImm *) override;
@@ -164,6 +170,9 @@ protected:
         std::vector<std::string> symbol_recorder;
         const GatherShiftRegsAllocates &gather_reg_allocs;
         bool need_index_type = false;
+        bool generate_affine = false;
+        std::map<std::string, int> var_to_affine_dims;
+        mlir::AffineExpr affine_expr;
     };
 
     const Target &target;
@@ -176,6 +185,7 @@ protected:
 
 CodeGen_MLIR_Dev::CodeGen_MLIR_Dev(const Target &t)
     : target(t) {
+    mlir_context.loadDialect<mlir::AffineDialect>();
     mlir_context.loadDialect<mlir::arith::ArithDialect>();
     mlir_context.loadDialect<mlir::func::FuncDialect>();
     mlir_context.loadDialect<mlir::memref::MemRefDialect>();
@@ -216,7 +226,9 @@ void CodeGen_MLIR_Dev::add_kernel(Stmt s,
 }
 
 std::vector<char> CodeGen_MLIR_Dev::compile_to_src() {
-    internal_assert(mlir::verify(mlir_module).succeeded());
+    mlir::PassManager pm(&mlir_context);
+    pm.addPass(mlir::createCanonicalizerPass());
+    internal_assert(mlir::succeeded(pm.run(mlir_module)));
 
     llvm::raw_os_ostream output(stream);
     mlir_module.print(output);
@@ -289,6 +301,26 @@ CodeGen_MLIR_Dev::MLIRBuilder::MLIRBuilder(mlir::ImplicitLocOpBuilder &builder,
     }
 }
 
+mlir::AffineExpr CodeGen_MLIR_Dev::MLIRBuilder::affine_codegen(const Expr &e) {
+    internal_assert(e.defined());
+    debug(4) << "Codegen (E): " << e.type() << ", " << e << "\n";
+    affine_expr = mlir::AffineExpr();
+    generate_affine = true;
+    e.accept(this);
+    generate_affine = false;
+    return affine_expr;
+}
+
+mlir::Value CodeGen_MLIR_Dev::MLIRBuilder::index_codegen(const Expr &e) {
+    internal_assert(e.defined());
+    debug(4) << "Codegen (E): " << e.type() << ", " << e << "\n";
+    value = mlir::Value();
+    need_index_type = true;
+    e.accept(this);
+    need_index_type = false;
+    return value;
+}
+
 mlir::Value CodeGen_MLIR_Dev::MLIRBuilder::codegen(const Expr &e) {
     internal_assert(e.defined());
     debug(4) << "Codegen (E): " << e.type() << ", " << e << "\n";
@@ -305,6 +337,10 @@ void CodeGen_MLIR_Dev::MLIRBuilder::codegen(const Stmt &s) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const IntImm *op) {
+    if (generate_affine) {
+        affine_expr = mlir::getAffineConstantExpr(op->value, builder.getContext());
+        return;
+    }
     std::string symbol_name = "c" + std::to_string(op->value) + (need_index_type ? "" : "_i32");
     if (!(value = sym_get(symbol_name, false))) {
         mlir::Type type = mlir_type_of(op->type);
@@ -316,6 +352,10 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const IntImm *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const UIntImm *op) {
+    if (generate_affine) {
+        affine_expr = mlir::getAffineConstantExpr(op->value, builder.getContext());
+        return;
+    }
     std::string symbol_name = "c" + std::to_string(op->value) + (need_index_type ? "" : "_i32");
     if (!(value = sym_get(symbol_name, false))) {
         mlir::Type type = mlir_type_of(op->type);
@@ -375,6 +415,13 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Reinterpret *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Variable *op) {
+    if (generate_affine) {
+        if (var_to_affine_dims.find(op->name) == var_to_affine_dims.end()) {
+            var_to_affine_dims[op->name] = var_to_affine_dims.size();
+        }
+        affine_expr = mlir::getAffineDimExpr(var_to_affine_dims[op->name], builder.getContext());
+        return;
+    }
     value = sym_get(op->name, true);
     if (!need_index_type && value.getType().isa<mlir::IndexType>()) {
         value = builder.create<mlir::arith::IndexCastOp>(builder.getIntegerType(32), value);
@@ -385,6 +432,10 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Variable *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Add *op) {
+    if (generate_affine) {
+        affine_expr = affine_codegen(op->a) + affine_codegen(op->b);
+        return;
+    }
     if (op->type.is_int_or_uint())
         value = builder.create<mlir::arith::AddIOp>(codegen(op->a), codegen(op->b));
     else if (op->type.is_float())
@@ -392,6 +443,10 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Add *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Sub *op) {
+    if (generate_affine) {
+        affine_expr = affine_codegen(op->a) - affine_codegen(op->b);
+        return;
+    }
     if (op->type.is_int_or_uint())
         value = builder.create<mlir::arith::SubIOp>(codegen(op->a), codegen(op->b));
     else if (op->type.is_float())
@@ -399,6 +454,10 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Sub *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Mul *op) {
+    if (generate_affine) {
+        affine_expr = affine_codegen(op->a) * affine_codegen(op->b);
+        return;
+    }
     if (op->type.is_int_or_uint())
         value = builder.create<mlir::arith::MulIOp>(codegen(op->a), codegen(op->b));
     else if (op->type.is_float())
@@ -406,6 +465,7 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Mul *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Div *op) {
+    internal_assert(!generate_affine);
     if (op->type.is_int())
         value = builder.create<mlir::arith::DivSIOp>(codegen(op->a), codegen(op->b));
     else if (op->type.is_uint())
@@ -415,6 +475,7 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Div *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Mod *op) {
+    internal_assert(!generate_affine);
     if (op->type.is_int())
         value = builder.create<mlir::arith::RemSIOp>(codegen(op->a), codegen(op->b));
     else if (op->type.is_uint())
@@ -519,15 +580,13 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Load *op) {
     mlir::Value buffer = sym_get(op->name + ".buffer");
     mlir::Type type = mlir_type_of(op->type);
     mlir::Value index;
-    need_index_type = true;
     if (op->type.is_scalar()) {
-        index = codegen(op->index);
+        index = index_codegen(op->index);
     } else if (Expr ramp_base = strided_ramp_base(op->index); ramp_base.defined()) {
-        index = codegen(ramp_base);
+        index = index_codegen(ramp_base);
     } else {
         internal_error << "Unsupported load\n";
     }
-    need_index_type = false;
 
     // index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), index);
     if (op->type.is_scalar()) {
@@ -557,6 +616,18 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Ramp *op) {
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Broadcast *op) {
     value = builder.create<mlir::vector::SplatOp>(mlir_type_of(op->type), codegen(op->value));
+}
+
+mlir::Value CodeGen_MLIR_Dev::MLIRBuilder::get_affine_index(const Expr &e) {
+    var_to_affine_dims.clear();
+    mlir::AffineExpr affine_expr = affine_codegen(e);
+    auto num_dims = var_to_affine_dims.size();
+    auto map = mlir::AffineMap::get(num_dims, 0, affine_expr, builder.getContext());
+    mlir::SmallVector<mlir::Value> vars(num_dims);
+    for (auto kv : var_to_affine_dims) {
+        vars[kv.second] = sym_get(kv.first);
+    }
+    return builder.create<mlir::AffineApplyOp>(builder.getUnknownLoc(), map, vars);
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Call *op) {
@@ -594,47 +665,39 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Call *op) {
         internal_assert(name);
         mlir::Value buffer = sym_get(name->value);
         mlir::SmallVector<mlir::Value> args;
-        need_index_type = true;
         for (size_t i = 1; i < op->args.size(); i++) {
-            args.push_back(codegen(op->args[i]));
+            args.push_back(get_affine_index(op->args[i]));
         }
-        need_index_type = false;
-        value = builder.create<mlir::memref::LoadOp>(mlir_type_of(op->type), buffer, args);
+        value = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), buffer, args);
     } else if (op->is_intrinsic(Call::write_shift_reg)) {
         auto name = op->args[0].as<StringImm>();
         internal_assert(name);
         mlir::Value buffer = sym_get(name->value);
         mlir::SmallVector<mlir::Value> args;
-        need_index_type = true;
         for (size_t i = 1; i < op->args.size()-1; i++) {
-            args.push_back(codegen(op->args[i]));
+            args.push_back(get_affine_index(op->args[i]));
         }
-        need_index_type = false;
         mlir::Value value = codegen(op->args.back());
-        builder.create<mlir::memref::StoreOp>(value, buffer, args);
+        builder.create<mlir::AffineStoreOp>(value, buffer, args);
     } else if (op->is_intrinsic(Call::image_load)) {
         auto name = op->args[0].as<StringImm>();
         internal_assert(name);
         mlir::Value buffer = sym_get(name->value + ".buffer");
         mlir::SmallVector<mlir::Value> args;
-        need_index_type = true;
         for (size_t i = 2; i < op->args.size(); i += 2) {
-            args.push_back(codegen(op->args[i]));
+            args.push_back(get_affine_index(op->args[i]));
         }
-        need_index_type = false;
-        value = builder.create<mlir::memref::LoadOp>(mlir_type_of(op->type), buffer, args);
+        value = builder.create<mlir::AffineLoadOp>(builder.getUnknownLoc(), buffer, args);
     } else if (op->is_intrinsic(Call::image_store)) {
         auto name = op->args[0].as<StringImm>();
         internal_assert(name);
         mlir::Value buffer = sym_get(name->value + ".buffer");
         mlir::SmallVector<mlir::Value> args;
-        need_index_type = true;
         for (size_t i = 2; i < op->args.size()-1; i += 2) {
-            args.push_back(codegen(op->args[i]));
+            args.push_back(get_affine_index(op->args[i]));
         }
-        need_index_type = false;
         mlir::Value value = codegen(op->args.back());
-        builder.create<mlir::memref::StoreOp>(value, buffer, args);
+        builder.create<mlir::AffineStoreOp>(value, buffer, args);
     } else {
         internal_error << "Call to " << op->name << " not implemented\n";
     }
@@ -691,27 +754,35 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
         }
         return;
     }
-    need_index_type = true;
-    mlir::Value lb = codegen(op->min);
-    mlir::Value ub = codegen(simplify(op->min + op->extent));
-    mlir::Value step = codegen(1);
-    need_index_type = false;
-    int prev_syms = symbol_recorder.size();
-    mlir::scf::ForOp forOp = builder.create<mlir::scf::ForOp>(lb, ub, step);
-    {
-        mlir::OpBuilder::InsertionGuard guard(builder);
-        builder.setInsertionPointToStart(forOp.getBody());
+    mlir::Value i;
+    mlir::Block *body;
+    if (is_const(op->min) && is_const(op->extent)) {
+        auto lb = *as_const_int(op->min);
+        auto ub = lb + *as_const_int(op->extent);
+        mlir::AffineForOp forOp = builder.create<mlir::AffineForOp>(lb, ub, 1);
+        i = forOp.getInductionVar();
+        body = forOp.getBody();
 
-        mlir::Value i = forOp.getInductionVar();
-        // sym_push(op->name, builder.create<mlir::arith::IndexCastOp>(mlir_type_of(max.type()), i));
-        sym_push(op->name, i);
-        codegen(op->body);
         if (op->for_type == ForType::Pipelined) {
             forOp->setAttr("pipeline", builder.getIntegerAttr(builder.getIntegerType(32), 1));
         }
         if (op->for_type == ForType::Unrolled) {
             forOp->setAttr("unroll", builder.getIntegerAttr(builder.getIntegerType(32), 0));
         }
+    } else {
+        mlir::Value lb = index_codegen(op->min);
+        mlir::Value ub = index_codegen(simplify(op->min + op->extent));
+        mlir::Value step = index_codegen(1);
+        mlir::scf::ForOp forOp = builder.create<mlir::scf::ForOp>(lb, ub, step);
+        i = forOp.getInductionVar();
+        body = forOp.getBody();
+    }
+    int prev_syms = symbol_recorder.size();
+    {
+        mlir::OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPointToStart(body);
+        sym_push(op->name, i);
+        codegen(op->body);
         sym_pop(op->name);
         for (int i = symbol_recorder.size()-1; i >= prev_syms; i--) {
             sym_pop(symbol_recorder.back());
@@ -724,15 +795,13 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Store *op) {
     mlir::Value buffer = sym_get(op->name + ".buffer");
     mlir::Value value = codegen(op->value);
     mlir::Value index;
-    need_index_type = true;
     if (op->value.type().is_scalar()) {
-        index = codegen(op->index);
+        index = index_codegen(op->index);
     } else if (Expr ramp_base = strided_ramp_base(op->index); ramp_base.defined()) {
-        index = codegen(ramp_base);
+        index = index_codegen(ramp_base);
     } else {
         internal_error << "Unsupported store\n";
     }
-    need_index_type = false;
 
     // index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), index);
     if (op->value.type().is_scalar()) {
