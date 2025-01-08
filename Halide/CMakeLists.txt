@@ -91,7 +91,7 @@ endif ()
 
 # Enable the SPIR-V target if requested (must declare before processing dependencies)
 option(TARGET_SPIRV "Include SPIR-V target" OFF)
-option(TARGET_VULKAN "Include Vulkan target" ON)
+option(TARGET_VULKAN "Include Vulkan target" OFF)
 if (TARGET_VULKAN)
     set(TARGET_SPIRV ON) # required
 endif()
