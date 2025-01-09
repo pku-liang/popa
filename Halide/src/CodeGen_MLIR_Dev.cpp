@@ -557,13 +557,15 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const GE *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const And *op) {
-    value = builder.create<mlir::arith::AndIOp>(codegen(NE::make(op->a, make_zero(op->a.type()))),
-                                                codegen(NE::make(op->b, make_zero(op->b.type()))));
+    // value = builder.create<mlir::arith::AndIOp>(codegen(NE::make(op->a, make_zero(op->a.type()))),
+    //                                             codegen(NE::make(op->b, make_zero(op->b.type()))));
+    value = builder.create<mlir::arith::AndIOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Or *op) {
-    value = builder.create<mlir::arith::OrIOp>(codegen(NE::make(op->a, make_zero(op->a.type()))),
-                                               codegen(NE::make(op->b, make_zero(op->b.type()))));
+    // value = builder.create<mlir::arith::OrIOp>(codegen(NE::make(op->a, make_zero(op->a.type()))),
+    //                                            codegen(NE::make(op->b, make_zero(op->b.type()))));
+    value = builder.create<mlir::arith::OrIOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Not *op) {
@@ -1001,7 +1003,9 @@ void CodeGen_MLIR_Dev::GatherShiftRegsAllocates::visit(const Call *op) {
 
 Stmt CodeGen_MLIR_Dev::standardize_ir_for_fpga_offloading(const Stmt &s) {
     s.accept(&gather_reg_allocs);
-    return RemoveDeviceDeclaration().mutate(s);
+    Stmt result = RemoveDeviceDeclaration().mutate(s);
+    result = RemoveIfStmt().mutate(s);
+    return simplify(result);
 }
 
 }  // namespace

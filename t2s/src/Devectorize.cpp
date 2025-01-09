@@ -387,11 +387,13 @@ Stmt make_a_stmt_for_group(const vector<Stmt> &stmts, const tuple<size_t, size_t
 class Devectorizer : public IRMutator {
     using IRMutator::visit;
 private:
+    const Target &target;
     string func_name; // The current Func
     string vectorized_loop; // The (only) vectorize loop of the current Func
 
 public:
-    Devectorizer() {}
+    Devectorizer(const Target &t)
+        : target(t) {}
 
     Stmt visit(const ProducerConsumer *op) override {
         if (op->is_producer) {
@@ -407,6 +409,10 @@ public:
             //         << " has a non-vectorized loop " << op->name << " under a vectorized loop: " << vectorized_loop
             //         << ". Currently the vectorized loop must be at the innermost level.\n";
             return IRMutator::visit(op);
+        }
+        if (target.has_feature(Target::MLIR)) {
+            // Currently we do not support data type vectorization in MLIR
+            return For::make(op->name, op->min, op->extent, ForType::Unrolled, op->device_api, op->body);
         }
         // user_assert(vectorized_loop.empty()) << "Func " << func_name
         //         << " has more than 1 vectorized loop: " << vectorized_loop
@@ -452,8 +458,8 @@ public:
 
 };  // anonymous namespace
 
-Stmt devectorize(Stmt s) {
-    Devectorizer devectorizer;
+Stmt devectorize(Stmt s, const Target &t) {
+    Devectorizer devectorizer(t);
     s = devectorizer.mutate(s);
     return s;
 }

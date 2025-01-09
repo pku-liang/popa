@@ -430,7 +430,7 @@ void lower_impl(const vector<Function> &output_funcs,
 
     if (t.has_fpga_feature()) {
         debug(1) << "Devectorize unsuitable loops...\n";
-        s = devectorize(s);
+        s = devectorize(s, t);
         log("Lowering after devectorizing unsuitable loops:\n", s);
     }
 
@@ -636,7 +636,7 @@ void lower_impl(const vector<Function> &output_funcs,
     log("Lowering after creating overlay scheduler:\n", s);
 
     debug(1) << "Remove lets...\n";
-    s = remove_lets(s, true, false, false, false, {});
+    s = remove_lets(s, true, true, false, false, {});
     log("Lowering after removing lets:", s);
 
     // The code generator should blindly generate code according to the IR, without tricks if possible.

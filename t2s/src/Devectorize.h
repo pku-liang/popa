@@ -34,7 +34,7 @@ namespace Internal {
  * the group has to be devectorized (remarked as Unrolled). Otherwise, the group is marked as Vectorize.
  * Assumption: there is only 1 Vectorize loop in a loop nest, and it must be at the innermost level.
  * */
-extern Stmt devectorize(Stmt s);
+extern Stmt devectorize(Stmt s, const Target &t);
 
 }
 }
