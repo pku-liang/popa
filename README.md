@@ -8,7 +8,8 @@ This paper aims at high and portable performance for tensor computations across 
 
 1. Acquiring repositories
 ```
-git clone -b cbc378ecb87e3f31dd5aff91f2a621d500640412 https://github.com/llvm/llvm-project.git
+git clone https://github.com/llvm/llvm-project.git
+git checkout cbc378ecb87e3f31dd5aff91f2a621d500640412
 git clone -b tutorial-aspdac https://github.com/pku-liang/Hector.git
 git clone -b mlir https://github.com/pku-liang/popa
 ```

@@ -13,7 +13,7 @@ HESTIA_DIR=${HESTIA:=hestia}
 run_popa() {
     pushd $POPA_DIR
     if [[ ! -e "tutorial" ]]; then
-        g++ tutorial.cpp -g -I./install/include -L./install/lib -lHalide -std=c++17
+        g++ tutorial.cpp -g -I./install/include -L./install/lib -lHalide -std=c++17 -o tutorial
     fi
     env LD_LIBRARY_PATH=./install/lib ./tutorial $1
     popd

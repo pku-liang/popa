@@ -1004,7 +1004,7 @@ void CodeGen_MLIR_Dev::GatherShiftRegsAllocates::visit(const Call *op) {
 Stmt CodeGen_MLIR_Dev::standardize_ir_for_fpga_offloading(const Stmt &s) {
     s.accept(&gather_reg_allocs);
     Stmt result = RemoveDeviceDeclaration().mutate(s);
-    result = RemoveIfStmt().mutate(s);
+    result = RemoveIfStmt().mutate(result);
     return simplify(result);
 }
 
