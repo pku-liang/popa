@@ -124,7 +124,7 @@ int main(int argc, char **argv)
     Target target = get_host_target();
     target.set_feature(Target::MLIR);
     C.compile_to_device(device_file, {}, target);
-    // C.compile_to_lowered_stmt(ir_file, {}, HTML, target);
+    C.compile_to_lowered_stmt(ir_file, {}, HTML, target);
 
     std::cout << "Generated file: " << device_file << ", " << ir_file << ".html\n";
     return 0;
