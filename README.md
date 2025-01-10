@@ -45,6 +45,7 @@ export PATH=$PWD/llvm-project/install/bin:$PATH
 cd popa
 cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -B build
 cmake --build build
+cmake --install build --prefix install
 cd ..
 ```
 
