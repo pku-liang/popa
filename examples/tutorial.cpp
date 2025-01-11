@@ -126,6 +126,6 @@ int main(int argc, char **argv)
     C.compile_to_device(device_file, {}, target);
     C.compile_to_lowered_stmt(ir_file, {}, HTML, target);
 
-    std::cout << "Generated file: " << device_file << ", " << ir_file << ".html\n";
+    std::cout << "Generated file: " << device_file << ", " << ir_file << "\n";
     return 0;
 }
