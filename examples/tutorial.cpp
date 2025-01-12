@@ -33,7 +33,7 @@ Func exp_0(Buffer<int> &A, Buffer<int> &B)
 Func exp_1(Buffer<int> &A, Buffer<int> &B)
 {
     Var i("i"), j("j"), k("k");
-    URE X("X", Int(32), {k, j, i}), Y("Y", Int(32), {k, j, i}), Z("Z", Float(32), {k, j, i}), C("C");
+    URE X("X", Int(32), {k, j, i}), Y("Y", Int(32), {k, j, i}), Z("Z", Int(32), {k, j, i}), C("C");
     X(k, j, i) = select(j == 0, A(k, i), X(k, j-1, i));
     Y(k, j, i) = select(i == 0, B(j, k), Y(k, j, i-1));
     Z(k, j, i) = select(k == 0, 0, Z(k-1, j, i)) + X(k, j, i) * Y(k, j, i);
