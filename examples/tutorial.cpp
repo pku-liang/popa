@@ -120,11 +120,11 @@ int main(int argc, char **argv)
             return 1;
     }
     string device_file = "mm_" + to_string(number) + ".mlir";
-    string ir_file = "exp_" + to_string(number) + ".html";
+    string ir_file = "exp_" + to_string(number);
     Target target = get_host_target();
     target.set_feature(Target::MLIR);
     C.compile_to_device(device_file, {}, target);
-    C.compile_to_lowered_stmt(ir_file, {}, HTML, target);
+    C.compile_to_lowered_stmt(ir_file, {}, Text, target);
 
     std::cout << "Generated file: " << device_file << ", " << ir_file << "\n";
     return 0;
