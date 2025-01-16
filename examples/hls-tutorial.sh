@@ -3,7 +3,7 @@ if [ -z "$1" ]; then
     echo "Usage:"
     echo "  Generate MLIR files: ./hls-tutorial.sh generate"
     echo "  Run vanilla version: ./hls-tutorial.sh run vanilla"
-    echo "  Run optimized version: ./hls-tutorial.sh run"
+    echo "  Run optimized version: ./hls-tutorial.sh run optimized"
 fi
 
 POPA_DIR=${POPA_DIR:=popa}
@@ -30,18 +30,16 @@ run_hector() {
 }
 
 if [[ "$1" == "generate" ]]; then
-    for i in {0..3}; do
-        echo "Function exp_$i"
-        run_popa $i
-    done
+    run_popa vanilla
+    run_popa optimized
 fi
 
 if [[ "$1" == "run" ]]; then
     if [[ "$2" == "vanilla" ]]; then
-        cp $POPA_DIR/examples/mm_0.mlir $HECTOR_DIR/examples/popa/
-        run_hector examples/popa/mm_0.mlir
-    else
-        cp $POPA_DIR/examples/mm_3.mlir $HECTOR_DIR/examples/popa/
-        run_hector examples/popa/mm_3.mlir
+        cp $POPA_DIR/examples/SCF_vanilla.mlir $HECTOR_DIR/examples/popa/
+        run_hector examples/popa/SCF_vanilla.mlir
+    elif [[ "$2" == "optimized" ]]; then
+        cp $POPA_DIR/examples/SCF_optimized.mlir $HECTOR_DIR/examples/popa/
+        run_hector examples/popa/SCF_optimized.mlir
     fi
 fi

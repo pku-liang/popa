@@ -15,7 +15,7 @@
 
 using namespace Halide;
 
-Func exp_0(Buffer<int> &A, Buffer<int> &B)
+Func vanilla(Buffer<int> &A, Buffer<int> &B)
 {
     Var i("i"), j("j");
     RDom k(0, N, "k");
@@ -30,51 +30,7 @@ Func exp_0(Buffer<int> &A, Buffer<int> &B)
     return C;
 }
 
-Func exp_1(Buffer<int> &A, Buffer<int> &B)
-{
-    Var i("i"), j("j"), k("k");
-    URE X("X", Int(32), {k, j, i}), Y("Y", Int(32), {k, j, i}), Z("Z", Int(32), {k, j, i}), C("C");
-    X(k, j, i) = select(j == 0, A(k, i), X(k, j-1, i));
-    Y(k, j, i) = select(i == 0, B(j, k), Y(k, j, i-1));
-    Z(k, j, i) = select(k == 0, 0, Z(k-1, j, i)) + X(k, j, i) * Y(k, j, i);
-    C(j, i) = select(k == N-1, Z(k, j, i));
-
-    X.merge_ures(Y, Z, C);
-    X.set_bounds(i, 0, M,
-                 j, 0, S,
-                 k, 0, N);
-    X.space_time_transform(j, i);
-
-    C.output_buffer().dim(0).set_bounds(0, S).set_stride(1);
-    C.output_buffer().dim(1).set_bounds(0, M).set_stride(S);
-    return C;
-}
-
-Func exp_2(Buffer<int> &A, Buffer<int> &B)
-{
-    #define P           jj, ii, k, j, i
-    Var i("i"), j("j"), k("k"), ii("ii"), jj("jj");
-    URE X("X", Int(32), {P}), Y("Y", Int(32), {P}), Z("Z", Int(32), {P}), C("C");
-    X(P) = select(jj == 0, A(k, ii + II*i), X(jj-1, ii, k, j, i));
-    Y(P) = select(ii == 0, B(jj + JJ*j, k), Y(jj, ii-1, k, j, i));
-    Z(P) = select(k == 0, 0, Z(jj, ii, k-1, j, i)) + X(P) * Y(P);
-    C(jj, ii, j, i) = select(k == N-1, Z(P));
-    #undef P
-
-    X.merge_ures(Y, Z, C);
-    X.set_bounds(i, 0, I, ii, 0, II)
-     .set_bounds(j, 0, J, jj, 0, JJ,
-                 k, 0, N);
-    X.space_time_transform(jj, ii);
-
-    C.output_buffer().dim(0).set_bounds(0, JJ).set_stride(1);
-    C.output_buffer().dim(1).set_bounds(0, II).set_stride(JJ);
-    C.output_buffer().dim(2).set_bounds(0, J).set_stride(II*JJ);
-    C.output_buffer().dim(3).set_bounds(0, I).set_stride(II*JJ*J);
-    return C;
-}
-
-Func exp_3(Buffer<int> &A, Buffer<int> &B)
+Func optimized(Buffer<int> &A, Buffer<int> &B)
 {
     #define P           kk, jj, ii, k, j, i
     Var i("i"), j("j"), k("k"), ii("ii"), jj("jj"), kk("kk");
@@ -104,25 +60,17 @@ Func exp_3(Buffer<int> &A, Buffer<int> &B)
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <0-3>\n";
+        std::cerr << "Usage: " << argv[0] << " [vanilla/optimized]\n";
         return 1;
     }
-    int number = std::stoi(argv[1]);
+    std::string version(argv[1]);
     Buffer<int> A(N, M, "A"), B(S, N, "B");
-    Func C;
-    switch (number) {
-        case 0: C = exp_0(A, B); break;
-        case 1: C = exp_1(A, B); break;
-        case 2: C = exp_2(A, B); break;
-        case 3: C = exp_3(A, B); break;
-        default:
-            std::cerr << "Usage: " << argv[0] << " <0-3>\n";
-            return 1;
-    }
-    string device_file = "mm_" + to_string(number) + ".mlir";
-    string ir_file = "exp_" + to_string(number);
+    Func C = (version == "vanilla") ? vanilla(A, B) : optimized(A, B);
+
     Target target = get_host_target();
     target.set_feature(Target::MLIR);
+    string device_file = "SCF_" + version + ".mlir";
+    string ir_file = "TensorIR_" + version;
     C.compile_to_device(device_file, {}, target);
     C.compile_to_lowered_stmt(ir_file, {}, Text, target);
 
