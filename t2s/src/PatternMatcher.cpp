@@ -19,11 +19,13 @@
 #include "../../Halide/src/IRMutator.h"
 #include "../../Halide/src/IRVisitor.h"
 #include "../../Halide/src/Simplify.h"
+#include "../../Halide/src/Substitute.h"
 #include "../../Halide/src/IREquality.h"
 #include "../../Halide/src/IROperator.h"
 #include "./StructType.h"
 #include "./PatternMatcher.h"
 #include "./Utilities.h"
+#include "./NoIfSimplify.h"
 
 namespace Halide {
 namespace Internal {
@@ -287,9 +289,224 @@ public:
 
 };
 
+class UreFlattener : public IRMutator
+{
+    const std::map<string, Function> &env;
+    std::vector<std::string> undecorated_loops;
+    std::map<std::string, std::vector<std::string>> func_to_loops;
+
+    bool var_name_match(const string &v1, const string &v2) {
+        return ((v1 == v2) ||
+                Internal::ends_with(v1, "." + v2) ||
+                Internal::ends_with(v2, "." + v1));
+    }
+
+public:
+    using IRMutator::visit;
+    UreFlattener(const std::map<string, Function> &_e) : env(_e) {}
+
+    Stmt visit(const For *op) override {
+        Function f;
+        if (function_is_in_environment(extract_first_token(op->name), env, f)
+        && f.has_merged_defs()) {
+            string var = extract_after_tokens(op->name, 2);
+            undecorated_loops.insert(undecorated_loops.begin(), var);
+        }
+        Stmt body = mutate(op->body);
+        return For::make(op->name, op->min, op->extent, op->for_type, op->device_api, body);
+    }
+
+    Expr visit(const Select *op) override {
+        if (op->condition.as<EQ>()) {
+            auto eq = op->condition.as<EQ>();
+            auto eq_a = eq->a.as<Variable>();
+            auto eq_b = eq->b.as<IntImm>();
+            if (eq_a && eq_b) {
+                std::vector<string> names = split_string(eq_a->name, ".");
+                // If the old_var is used, only three components exist (X.s0.i)
+                if (names.size() == 3) {
+                    Function f;
+                    internal_assert(function_is_in_environment(names[0], env, f));
+                    auto splits = f.definition().schedule().splits();
+                    auto split_it = std::find_if(splits.begin(), splits.end(),
+                                                [&](const Split &s){ return s.old_var == names.back(); });
+                    // If this var is split
+                    Expr cond = op->condition;
+                    Expr true_value = mutate(op->true_value);
+                    Expr false_value = mutate(op->false_value);
+                    if (split_it != splits.end()) {
+                        const auto &loops = func_to_loops[names[0]];
+                        auto inner_it = std::find_if(loops.begin(), loops.end(),
+                                                    [&](const string &l){ return var_name_match(split_it->inner, extract_last_token(l)); });
+                        auto outer_it = std::find_if(loops.begin(), loops.end(),
+                                                    [&](const string &l){ return var_name_match(split_it->outer, extract_last_token(l)); });
+                        internal_assert(inner_it != loops.end() && outer_it != loops.end());
+                        cond = substitute(eq_a->name, Variable::make(Int(32), *inner_it), cond);
+                    }
+                    return Select::make(cond, true_value, false_value);
+                }
+            }
+        }
+        return IRMutator::visit(op);
+    }
+
+    Stmt visit(const LetStmt *op) override {
+        Function f;
+        if (function_is_in_environment(extract_first_token(op->name), env, f)
+        && (f.has_merged_defs() || f.definition().schedule().is_merged())) {
+            const auto &splits = f.definition().schedule().splits();
+            auto split_it = std::find_if(splits.begin(), splits.end(),
+                                        [&](const Split &s){ return s.old_var == extract_last_token(op->name); });
+            if (split_it != splits.end()) {
+                // Remove boundary checks by generating old_var from split information
+                Stmt body = mutate(op->body);
+                const auto &loops = func_to_loops[f.name()];
+                auto inner_it = std::find_if(loops.begin(), loops.end(),
+                                            [&](const string &l){ return var_name_match(split_it->inner, extract_last_token(l)); });
+                auto outer_it = std::find_if(loops.begin(), loops.end(),
+                                            [&](const string &l){ return var_name_match(split_it->outer, extract_last_token(l)); });
+                internal_assert(inner_it != loops.end() && outer_it != loops.end());
+                Expr new_old_var = Variable::make(Int(32), *outer_it)*(split_it->factor) + Variable::make(Int(32), *inner_it);
+                return LetStmt::make(op->name, new_old_var, body);
+            }
+        }
+        return IRMutator::visit(op);
+    }
+
+    Expr visit(const Call *op) override {
+        Function f;
+        if (op->call_type == Call::Halide && function_is_in_environment(op->name, env, f)
+        && (f.has_merged_defs() || f.definition().schedule().is_merged())) {
+            const auto &splits = f.definition().schedule().splits();
+            std::vector<Expr> args(undecorated_loops.size());
+            for (auto arg : op->args) {
+                string decorated_var;
+                // int dist = 0;
+                if (arg.as<Variable>()) {
+                    decorated_var = arg.as<Variable>()->name;
+                } else if (arg.as<Sub>()) {
+                    Expr a = arg.as<Sub>()->a;
+                    Expr b = arg.as<Sub>()->b;
+                    internal_assert(a.as<Variable>() && b.as<IntImm>());
+                    decorated_var = a.as<Variable>()->name;
+                    // dist = b.as<IntImm>()->value;
+                } else {
+                    internal_error << "Wrong URE call argument" << arg;
+                }
+                // If this var is split
+                auto split_it = std::find_if(splits.begin(), splits.end(),
+                                             [&](const Split &s){ return s.old_var == extract_last_token(decorated_var); });
+                if (split_it != splits.end()) {
+                    const auto &loops = func_to_loops[f.name()];
+                    auto inner_it = std::find_if(loops.begin(), loops.end(),
+                                                [&](const string &l){ return var_name_match(split_it->inner, extract_last_token(l)); });
+                    auto outer_it = std::find_if(loops.begin(), loops.end(),
+                                                [&](const string &l){ return var_name_match(split_it->outer, extract_last_token(l)); });
+                    internal_assert(inner_it != loops.end() && outer_it != loops.end());
+                    args[std::distance(loops.begin(), inner_it)] = substitute(decorated_var, Variable::make(Int(32), *inner_it), arg);
+                    args[std::distance(loops.begin(), outer_it)] = Variable::make(Int(32), *outer_it);
+                } else {
+                    const auto &loops = func_to_loops[extract_first_token(decorated_var)];
+                    auto loop_it = std::find_if(loops.begin(), loops.end(),
+                                                [&](const string &l){ return decorated_var == l; });
+                    internal_assert(loop_it != loops.end());
+                    args[std::distance(loops.begin(), loop_it)] = arg;
+                }
+            }
+            return Call::make(op->type, op->name, args, Call::CallType::Halide);
+        }
+        return IRMutator::visit(op);
+    }
+
+    Stmt visit(const Provide *op) override {
+        Function f;
+        if (function_is_in_environment(op->name, env, f)
+        && (f.has_merged_defs() || f.definition().schedule().is_merged())) {
+            for (auto lp : undecorated_loops) {
+                if (f.definition().schedule().is_extended_ure()) {
+                    // Some dimensions are missing in extended UREs
+                    const vector<Dim> &all_dims = f.definition().schedule().dims();
+                    auto dim_it = std::find_if(all_dims.begin(), all_dims.end(),
+                                               [&](const Dim &d) { return d.var == lp; });
+                    if (dim_it == all_dims.end()) continue;
+                }
+                std::vector<std::string> names = split_string(lp, ".");
+                internal_assert(names.size() <= 2);
+                std::string var_name = op->name + ".s0";
+                // If this loop is split from the original loop.
+                if (names.size() > 1) {
+                    var_name += "." + names[0];
+                    names.erase(names.begin());
+                }
+                if (f.definition().schedule().is_merged()) {
+                    var_name += ".fused";
+                }
+                var_name += "." + names[0];
+                func_to_loops[op->name].push_back(var_name);
+            }
+            std::vector<Expr> values;
+            for (const auto &v : op->values) {
+                values.push_back(mutate(v));
+            }
+            std::vector<Expr> args;
+            if (f.definition().schedule().is_output()) {
+                // Do not flatten output URE
+                args = op->args;
+            } else {
+                for (auto &l : func_to_loops[op->name]) {
+                    args.push_back(Variable::make(Int(32), l));
+                }
+            }
+            return Provide::make(op->name, values, args);
+        }
+        return IRMutator::visit(op);
+    }
+};
+
+class RealizeRewriter : public IRMutator
+{
+    Region loop_bounds;
+    const std::map<string, Function> &env;
+public:
+    using IRMutator::visit;
+    RealizeRewriter(const std::map<string, Function> &_e) : env(_e) {}
+
+    Stmt visit(const Realize *op) override {
+        Function f;
+        if (function_is_in_environment(op->name, env, f)
+        && (f.has_merged_defs() || f.definition().schedule().is_merged())) {
+            Stmt body = mutate(op->body);
+            internal_assert(!loop_bounds.empty());
+            return Realize::make(op->name, op->types, op->memory_type, loop_bounds, op->condition, body);
+        }
+        return IRMutator::visit(op);
+    }
+
+    Stmt visit(const For *op) override {
+        Function f;
+        if (function_is_in_environment(extract_first_token(op->name), env, f)
+        && f.has_merged_defs()) {
+            loop_bounds.insert(loop_bounds.begin(), Range(op->min, op->extent));
+        }
+        Stmt body = mutate(op->body);
+        return For::make(op->name, op->min, op->extent, op->for_type, op->device_api, body);
+    }
+};
+
 Stmt rewrite_memory_partition(Stmt s, const std::map<string, Function> &env) {
     PartitionMatcher pm(env);
     s = pm.mutate(s);
+    return s;
+}
+
+Stmt flatten_UREs(Stmt s, const std::map<string, Function> &env) {
+    UreFlattener uf(env);
+    s = uf.mutate(s);
+    // To obtain loop bounds, we simplify the IR by replacing LetStmts about loop bounds.
+    s = no_if_simplify(s, true);
+    // Collect loop bounds and replace the region of Realize nodes of UREs
+    RealizeRewriter rr(env);
+    s = rr.mutate(s);
     return s;
 }
 

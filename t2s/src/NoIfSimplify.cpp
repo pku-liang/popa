@@ -77,7 +77,8 @@ class Simplifier : public Simplify {
     // Do not simplify loops with extent of 1
     Stmt visit(const For *op) override {
         std::vector<std::string> names = split_string(op->name, ".");
-        if (keep_loops && names[2] != "fused") {
+        bool fused_loop = std::find(names.begin(), names.end(), "fused") != names.end();
+        if (keep_loops && !fused_loop) {
             Stmt body = mutate(op->body);
             Expr min = mutate(op->min, nullptr);
             Expr extent = mutate(op->extent, nullptr);

@@ -33,6 +33,7 @@
 #include "../../t2s/src/CheckFuncConstraints.h"
 #include "../../t2s/src/DebugPrint.h"
 #include "../../t2s/src/Overlay.h"
+#include "../../t2s/src/Utilities.h"
 
 namespace Halide {
 
@@ -1340,6 +1341,20 @@ Stage &Stage::split(const VarOrRVar &old, const VarOrRVar &outer, const VarOrRVa
         user_assert(!inner.is_rvar) << "Can't split Var " << old.name() << " into RVar " << inner.name() << "\n";
     }
     split(old.name(), outer.name(), inner.name(), factor, old.is_rvar, tail);
+
+    if (function.has_merged_defs()) {
+        for (auto f : definition.schedule().merged_ures()) {
+            if (!f.function().definition().schedule().is_extended_ure()) {
+                f.split(old, outer, inner, factor, tail);
+            } else {
+                const auto &dims = f.function().definition().schedule().dims();
+                auto var_finder = std::find_if(dims.begin(), dims.end(), [&](const Dim& d){ return d.var == old.name(); });
+                if (var_finder != dims.end()) {
+                    f.split(old, outer, inner, factor, tail);
+                }
+            }
+        }
+    }
     return *this;
 }
 
@@ -1969,7 +1984,7 @@ Stage &Stage::reorder(const std::vector<VarOrRVar> &vars) {
         if (new_var_name=="") {
             // Inner-most level
             // For some extended ure
-            new_var_name = dims[0].var;
+            new_var_name = original_var.name();
         }
         // Var is changed after reorder
         if (new_var_name != original_var.name()) {
@@ -2000,6 +2015,49 @@ Stage &Stage::reorder(const std::vector<VarOrRVar> &vars) {
     // the last one).
     user_assert(dims.back().var == Var::outermost().name())
         << "Var::outermost() may not be reordered inside any other var.\n";
+
+    if (function.has_merged_defs()) {
+        auto ures = definition.schedule().merged_ures();
+        for (auto f : ures) {
+            if (!f.function().definition().schedule().is_extended_ure()) {
+                f.reorder(vars);
+            } else {
+                // The UREs only have Vars. There is no RVars.
+                std::set<string> out_vars;
+                const auto &dims = f.function().definition().schedule().dims();
+                for (auto d : dims) {
+                    out_vars.insert(extract_last_token(d.var));
+                }
+                vector<VarOrRVar> out_var_order;
+                for (auto v : vars) {
+                    if (out_vars.find(v.name()) != out_vars.end()) {
+                        out_var_order.push_back(v);
+                    }
+                }
+                f.reorder(out_var_order);
+            }
+        }
+        // Apply merge_ures again with the new innermost loop
+        size_t num_outputs = 0;
+        for (auto f : ures) {
+            if (f.function().definition().schedule().is_output()) num_outputs++;
+        }
+        string innermost_loop = extract_last_token(definition.schedule().dims()[0].var);
+        Func last_non_output_func = Func(function);
+        if (ures.size() > num_outputs) {
+            last_non_output_func = *(ures.rbegin() + num_outputs);
+        }
+        for (auto it = ures.rbegin(); it != ures.rbegin()+num_outputs; it++) {
+            it->compute_with(last_non_output_func, Var(innermost_loop));
+        }
+        if (ures.size() > num_outputs) {
+            // Use compute_with iteratively to achieve merge_ure
+            for (auto it = ures.rbegin()+num_outputs; it != ures.rend()-1; it++) {
+                it->compute_with(*(it + 1), Var(innermost_loop));
+            }
+        }
+        ures[0].compute_with(*this, Var(innermost_loop));
+    }
 
     return *this;
 }
@@ -2266,7 +2324,7 @@ void Func::apply_same_loop_transform_to_merged_ures() {
         bool done = false;
         for (size_t k = 0; k < func_dims.size(); ++k)
             for (size_t i = 0; i < merged_dims.size(); ++i) {
-                if (var_name_match(merged_dims[i].var, func_dims[k].var)) {
+                if (merged_dims[i].var == func_dims[k].var) {
                     auto for_type = func_dims[k].for_type;
                     auto device_api = func_dims[k].device_api;
                     internal_assert(supported_types.count(for_type) > 0)
@@ -2855,49 +2913,6 @@ Func &Func::tile(const std::vector<VarOrRVar> &previous,
 Func &Func::reorder(const std::vector<VarOrRVar> &vars) {
     invalidate_cache();
     Stage(func, func.definition(), 0).reorder(vars);
-
-    if (func.has_merged_defs()) {
-        for (auto f : func.definition().schedule().merged_ures()) {
-            if (!f.function().definition().schedule().is_extended_ure()) {
-                f.reorder(vars);
-            } else {
-                // The UREs only have Vars. There is no RVars.
-                map<string, Var> out_vars;
-                for (auto v : f.args()) {
-                    out_vars[v.name()] = v;
-                }
-                vector<VarOrRVar> out_var_order;
-                for (auto v : vars) {
-                    if (out_vars.find(v.name()) != out_vars.end()) {
-                        out_var_order.push_back(v);
-                    }
-                }
-                f.reorder(out_var_order);
-            }
-        }
-        // This part should be aligned with merge_ures
-        auto ures = func.definition().schedule().merged_ures();
-        size_t num_outputs = 0;
-        for (auto f : ures) {
-            if (f.func.definition().schedule().is_output()) num_outputs++;
-        }
-        VarOrRVar innermost_loop = vars[0];
-        Func last_non_output_func = *this;
-        if (ures.size() > num_outputs) {
-            last_non_output_func = *(ures.rbegin() + num_outputs);
-        }
-        for (auto it = ures.rbegin(); it != ures.rbegin()+num_outputs; it++) {
-            it->compute_with(last_non_output_func, innermost_loop);
-        }
-        if (ures.size() > num_outputs) {
-            // Use compute_with iteratively to achieve merge_ure
-            for (auto it = ures.rbegin()+num_outputs; it != ures.rend()-1; it++) {
-                it->compute_with(*(it + 1), innermost_loop);
-            }
-        }
-        ures[0].compute_with(*this, innermost_loop);
-    }
-
     return *this;
 }
 

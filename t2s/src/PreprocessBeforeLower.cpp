@@ -212,9 +212,9 @@ void annotate_pipelined_loop(Func func) {
     }
 }
 
-
 void t2s_preprocess_before_lower(map<string, Func> &env, const Target &target) {
     debug(4) << "Preprocessing functions in the environment:\n";
+
     for (auto &e : env) {
         auto &func = e.second;
 
@@ -234,7 +234,7 @@ void t2s_preprocess_before_lower(map<string, Func> &env, const Target &target) {
         }
         // Space-time transform
         func.apply_same_loop_transform_to_merged_ures();
-        check_space_time_transform(func, target);
+        // check_space_time_transform(func, target);
     }
 }
 

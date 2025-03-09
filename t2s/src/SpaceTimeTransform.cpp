@@ -488,7 +488,7 @@ class SpaceTimeTransformer : public IRMutator {
         Stmt body = mutate(op->body);
         Region bounds = op->bounds;
 
-        if (reg_size_map.find(op->name) != reg_size_map.end()) {
+        if (need_rewrite && reg_size_map.find(op->name) != reg_size_map.end()) {
             bounds.clear();
             auto &mins = reg_size_map[op->name].mins;
             auto &maxs = reg_size_map[op->name].maxs;
@@ -521,7 +521,7 @@ class SpaceTimeTransformer : public IRMutator {
                 need_rewrite = false;
             }
             // calculate the number of space loops and new time loops
-            num_args                = func.args().size();
+            num_args                = func.definition().schedule().dims().size() - 1;
             num_time_vars           = 1;
             num_space_vars          = param_vector[0].num_space_vars;
             num_other_vars          = num_args - num_space_vars - num_time_vars;
@@ -1162,7 +1162,6 @@ Stmt apply_space_time_transform(Stmt s,
     // Simplify the incoming loop first
     SelectToIfConverter converter;
     s = no_if_simplify(converter.mutate(s), true);
-    debug(4) << s;
 
     if (target.has_feature(Target::IntelGPU)) {
         PreRewriter rewriter(env);

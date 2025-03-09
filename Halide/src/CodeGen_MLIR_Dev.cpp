@@ -769,6 +769,7 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const For *op) {
             forOp->setAttr("pipeline", builder.getIntegerAttr(builder.getIntegerType(32), 1));
         }
         if (op->for_type == ForType::Unrolled) {
+            // Fully unroll
             forOp->setAttr("unroll", builder.getIntegerAttr(builder.getIntegerType(32), 0));
         }
     } else {
