@@ -641,10 +641,6 @@ void lower_impl(const vector<Function> &output_funcs,
     s = simplify(create_overlay_schedule(s, env));
     log("Lowering after creating overlay scheduler:\n", s);
 
-    debug(1) << "Remove lets...\n";
-    s = remove_lets(s, true, true, false, false, {});
-    log("Lowering after removing lets:", s);
-
     // The code generator should blindly generate code according to the IR, without tricks if possible.
     // So here standardize the IR to make it have the same abstraction level as the target language to generate.
     // Although below it is done only for OpenCL and clear code gen only, ideally it should be done for any target
