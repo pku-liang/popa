@@ -1340,20 +1340,45 @@ Stage &Stage::split(const VarOrRVar &old, const VarOrRVar &outer, const VarOrRVa
         user_assert(!outer.is_rvar) << "Can't split Var " << old.name() << " into RVar " << outer.name() << "\n";
         user_assert(!inner.is_rvar) << "Can't split Var " << old.name() << " into RVar " << inner.name() << "\n";
     }
+    if (function.has_merged_defs()) {
+        // Enforce RoundUp strategy to avoid unnecessary boundary checks
+        tail = TailStrategy::RoundUp;
+    }
     split(old.name(), outer.name(), inner.name(), factor, old.is_rvar, tail);
 
     if (function.has_merged_defs()) {
-        for (auto f : definition.schedule().merged_ures()) {
+        auto ures = definition.schedule().merged_ures();
+        for (auto f : ures) {
             if (!f.function().definition().schedule().is_extended_ure()) {
                 f.split(old, outer, inner, factor, tail);
             } else {
                 const auto &dims = f.function().definition().schedule().dims();
-                auto var_finder = std::find_if(dims.begin(), dims.end(), [&](const Dim& d){ return d.var == old.name(); });
+                auto var_finder = std::find_if(dims.begin(), dims.end(), [&](const Dim& d){ return var_name_match(d.var, old.name()); });
                 if (var_finder != dims.end()) {
                     f.split(old, outer, inner, factor, tail);
                 }
             }
         }
+        // Apply merge_ures again with the new innermost loop
+        size_t num_outputs = 0;
+        for (auto f : ures) {
+            if (f.function().definition().schedule().is_output()) num_outputs++;
+        }
+        string innermost_loop = extract_last_token(definition.schedule().dims()[0].var);
+        Func last_non_output_func = Func(function);
+        if (ures.size() > num_outputs) {
+            last_non_output_func = *(ures.rbegin() + num_outputs);
+        }
+        for (auto it = ures.rbegin(); it != ures.rbegin()+num_outputs; it++) {
+            it->compute_with(last_non_output_func, Var(innermost_loop));
+        }
+        if (ures.size() > num_outputs) {
+            // Use compute_with iteratively to achieve merge_ure
+            for (auto it = ures.rbegin()+num_outputs; it != ures.rend()-1; it++) {
+                it->compute_with(*(it + 1), Var(innermost_loop));
+            }
+        }
+        ures[0].compute_with(*this, Var(innermost_loop));
     }
     return *this;
 }
@@ -1964,51 +1989,6 @@ Stage &Stage::reorder(const std::vector<VarOrRVar> &vars) {
         dims[sorted[i]] = dims_old[idx[i]];
     }
 
-    // Make compute_with stay at the same position
-    Definition &original_def = (stage_index == 0) ? function.definition() : function.update(stage_index - 1);
-    FuseLoopLevel &fuse_level = original_def.schedule().fuse_level();
-    // Already have compute_with
-    if (!fuse_level.level.lock().is_inlined()) {
-        LoopLevel original_level = fuse_level.level;
-        const VarOrRVar& original_var = original_level.var();
-
-        // Find the new var at the same position after reorder
-        string new_var_name;
-        for (size_t i = 0; i < dims_old.size(); i++) {
-            if (var_name_match(dims_old[i].var, original_var.name())) {
-                new_var_name = dims[i].var;
-                break;
-            }
-        }
-
-        if (new_var_name=="") {
-            // Inner-most level
-            // For some extended ure
-            new_var_name = original_var.name();
-        }
-        // Var is changed after reorder
-        if (new_var_name != original_var.name()) {
-            size_t new_var_pos = 0;
-            bool found = false;
-            // Find the VarOrRVar (not just name string)
-            for (size_t i = 0; i < vars.size(); i++) {
-                if (var_name_match(vars[i].name(), new_var_name)) {
-                    new_var_pos = i;
-                    found = true;
-                    break;
-                }
-            }
-
-            internal_assert(found);
-            // The LoopLevel only has public API that need Func or Function
-            // So, constuct a new Func with same name.
-            // The LoopLevel only records the func name.
-            LoopLevel new_level(Func(original_level.func()), vars[new_var_pos], original_level.stage_index());
-            new_level.lock();
-            fuse_level.level = new_level; 
-        }
-    }
-
     dims_old.swap(dims);
 
     // We're not allowed to reorder Var::outermost inwards (rfactor assumes it's
@@ -2265,12 +2245,12 @@ Stage &Stage::compute_with(LoopLevel loop_level, const map<string, LoopAlignStra
         << loop_level.func() << ", so it must not have any specializations.\n";
 
     FuseLoopLevel &fuse_level = original_def.schedule().fuse_level();
-    if (!fuse_level.level.lock().is_inlined()) {
-        if (fuse_level.level.to_string() != loop_level.to_string()) {
-             user_warning << name() << " already has a compute_with at " << fuse_level.level.to_string()
-                         << ". Replacing it with a new compute_with at " << loop_level.to_string() << "\n";
-        }
-    }
+    // if (!fuse_level.level.lock().is_inlined()) {
+    //     if (fuse_level.level.to_string() != loop_level.to_string()) {
+    //          user_warning << name() << " already has a compute_with at " << fuse_level.level.to_string()
+    //                      << ". Replacing it with a new compute_with at " << loop_level.to_string() << "\n";
+    //     }
+    // }
     fuse_level.level = loop_level;
     fuse_level.align = align;
     return *this;

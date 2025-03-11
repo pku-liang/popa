@@ -293,7 +293,9 @@ class UreFlattener : public IRMutator
 {
     const std::map<string, Function> &env;
     std::vector<std::string> undecorated_loops;
+    std::vector<std::string> space_vars;
     std::map<std::string, std::vector<std::string>> func_to_loops;
+    bool propagation_pattern = false;
 
     bool var_name_match(const string &v1, const string &v2) {
         return ((v1 == v2) ||
@@ -303,7 +305,19 @@ class UreFlattener : public IRMutator
 
 public:
     using IRMutator::visit;
-    UreFlattener(const std::map<string, Function> &_e) : env(_e) {}
+    UreFlattener(const std::map<string, Function> &_e) : env(_e) {
+        for (auto &kv : env) {
+            Function f = kv.second;
+            if (f.has_merged_defs()) {
+                auto stt_param = f.definition().schedule().transform_params();
+                if (!stt_param.empty()) {
+                    auto src_vars = stt_param[0].src_vars;
+                    auto num_space_vars = stt_param[0].num_space_vars;
+                    std::copy(src_vars.begin(), src_vars.begin() + num_space_vars, std::back_inserter(space_vars));
+                }
+            }
+        }
+    }
 
     Stmt visit(const For *op) override {
         Function f;
@@ -320,54 +334,72 @@ public:
         if (op->condition.as<EQ>()) {
             auto eq = op->condition.as<EQ>();
             auto eq_a = eq->a.as<Variable>();
-            auto eq_b = eq->b.as<IntImm>();
-            if (eq_a && eq_b) {
+            if (eq_a) {
                 std::vector<string> names = split_string(eq_a->name, ".");
-                // If the old_var is used, only three components exist (X.s0.i)
+                // If the old_var is used, only three components exist (e.g., X.s0.i)
                 if (names.size() == 3) {
                     Function f;
                     internal_assert(function_is_in_environment(names[0], env, f));
+                    std::vector<Split> sub_loops;
                     auto splits = f.definition().schedule().splits();
                     auto split_it = std::find_if(splits.begin(), splits.end(),
                                                 [&](const Split &s){ return s.old_var == names.back(); });
-                    // If this var is split
-                    Expr cond = op->condition;
+                    while (split_it != splits.end()) {
+                        sub_loops.insert(sub_loops.begin(), *split_it);
+                        split_it = std::find_if(splits.begin(), splits.end(),
+                                                [&](const Split &s){ return s.old_var == split_it->inner; });
+                    }
+
                     Expr true_value = mutate(op->true_value);
                     Expr false_value = mutate(op->false_value);
-                    if (split_it != splits.end()) {
-                        const auto &loops = func_to_loops[names[0]];
+                    Expr cond = sub_loops.empty() ? op->condition : const_true();
+                    const auto &loops = func_to_loops[names[0]];
+                    int lp_prod = 1;
+                    // Combining the condition of each sub-loop
+                    for (auto sublp : sub_loops) {
                         auto inner_it = std::find_if(loops.begin(), loops.end(),
-                                                    [&](const string &l){ return var_name_match(split_it->inner, extract_last_token(l)); });
+                                                    [&](const string &l){ return var_name_match(sublp.inner, extract_last_token(l)); });
                         auto outer_it = std::find_if(loops.begin(), loops.end(),
-                                                    [&](const string &l){ return var_name_match(split_it->outer, extract_last_token(l)); });
+                                                    [&](const string &l){ return var_name_match(sublp.outer, extract_last_token(l)); });
                         internal_assert(inner_it != loops.end() && outer_it != loops.end());
-                        cond = substitute(eq_a->name, Variable::make(Int(32), *inner_it), cond);
+
+                        if (is_const_zero(eq->b)) {
+                            if (propagation_pattern) {
+                                // For a propagation pattern, this condition is rewritten as space == 0
+                                user_assert(!space_vars.empty())
+                                    << "Please specify space loops through space_time_transform\n";
+                                auto space_it = std::find(space_vars.begin(), space_vars.end(), extract_last_token(*inner_it));
+                                if (space_it != space_vars.end()) {
+                                    cond = Variable::make(Int(32), *inner_it) == 0;
+                                }
+                            } else {
+                                // Otherwise, this is rewritten as outer == 0 && inner == 0
+                                Expr inner_cond = Variable::make(Int(32), *inner_it) == 0;
+                                cond = cond && inner_cond;
+                            }
+                        } else {
+                            // Propagation patterns should not have such a condition on the loop's upper bound.
+                            user_assert(!propagation_pattern)
+                                << "Condition " << cond << " is invalid. Consider rewrite it as " << *inner_it << " == 0\n";
+                            // This is rewritten as outer == b/factor && inner == factor-1
+                            user_assert(is_const(sublp.factor))
+                                << "Split factor of loop " << sublp.old_var << " must be constant\n";
+
+                            int factor = *as_const_int(sublp.factor);
+                            Expr inner_cond = Variable::make(Int(32), *inner_it) == make_const(Int(32), (factor / lp_prod) - 1);
+                            cond = cond && inner_cond;
+                            lp_prod = factor;
+                        }
+                    }
+                    if (!sub_loops.empty() && !propagation_pattern) {
+                        auto outer_it = std::find_if(loops.begin(), loops.end(),
+                                                     [&](const string &l){ return var_name_match(sub_loops.back().outer, extract_last_token(l)); });
+                        internal_assert(outer_it != loops.end());
+                        Expr outer_cond = Variable::make(Int(32), *outer_it) == (eq->b / make_const(Int(32), lp_prod));
+                        cond = cond && outer_cond;
                     }
                     return Select::make(cond, true_value, false_value);
                 }
-            }
-        }
-        return IRMutator::visit(op);
-    }
-
-    Stmt visit(const LetStmt *op) override {
-        Function f;
-        if (function_is_in_environment(extract_first_token(op->name), env, f)
-        && (f.has_merged_defs() || f.definition().schedule().is_merged())) {
-            const auto &splits = f.definition().schedule().splits();
-            auto split_it = std::find_if(splits.begin(), splits.end(),
-                                        [&](const Split &s){ return s.old_var == extract_last_token(op->name); });
-            if (split_it != splits.end()) {
-                // Remove boundary checks by generating old_var from split information
-                Stmt body = mutate(op->body);
-                const auto &loops = func_to_loops[f.name()];
-                auto inner_it = std::find_if(loops.begin(), loops.end(),
-                                            [&](const string &l){ return var_name_match(split_it->inner, extract_last_token(l)); });
-                auto outer_it = std::find_if(loops.begin(), loops.end(),
-                                            [&](const string &l){ return var_name_match(split_it->outer, extract_last_token(l)); });
-                internal_assert(inner_it != loops.end() && outer_it != loops.end());
-                Expr new_old_var = Variable::make(Int(32), *outer_it)*(split_it->factor) + Variable::make(Int(32), *inner_it);
-                return LetStmt::make(op->name, new_old_var, body);
             }
         }
         return IRMutator::visit(op);
@@ -377,43 +409,88 @@ public:
         Function f;
         if (op->call_type == Call::Halide && function_is_in_environment(op->name, env, f)
         && (f.has_merged_defs() || f.definition().schedule().is_merged())) {
-            const auto &splits = f.definition().schedule().splits();
-            std::vector<Expr> args(undecorated_loops.size());
+            const auto &loops = func_to_loops[f.name()];
+            std::vector<Expr> args;
+            // Fill args in the correct order
+            for (auto &l : loops) {
+                args.push_back(Variable::make(Int(32), l));
+            }
+            Expr call_node;
+            // Iterate all args to find dependency
             for (auto arg : op->args) {
-                string decorated_var;
-                // int dist = 0;
-                if (arg.as<Variable>()) {
-                    decorated_var = arg.as<Variable>()->name;
-                } else if (arg.as<Sub>()) {
-                    Expr a = arg.as<Sub>()->a;
-                    Expr b = arg.as<Sub>()->b;
-                    internal_assert(a.as<Variable>() && b.as<IntImm>());
-                    decorated_var = a.as<Variable>()->name;
-                    // dist = b.as<IntImm>()->value;
-                } else {
-                    internal_error << "Wrong URE call argument" << arg;
-                }
-                // If this var is split
-                auto split_it = std::find_if(splits.begin(), splits.end(),
-                                             [&](const Split &s){ return s.old_var == extract_last_token(decorated_var); });
-                if (split_it != splits.end()) {
-                    const auto &loops = func_to_loops[f.name()];
-                    auto inner_it = std::find_if(loops.begin(), loops.end(),
-                                                [&](const string &l){ return var_name_match(split_it->inner, extract_last_token(l)); });
-                    auto outer_it = std::find_if(loops.begin(), loops.end(),
-                                                [&](const string &l){ return var_name_match(split_it->outer, extract_last_token(l)); });
-                    internal_assert(inner_it != loops.end() && outer_it != loops.end());
-                    args[std::distance(loops.begin(), inner_it)] = substitute(decorated_var, Variable::make(Int(32), *inner_it), arg);
-                    args[std::distance(loops.begin(), outer_it)] = Variable::make(Int(32), *outer_it);
-                } else {
-                    const auto &loops = func_to_loops[extract_first_token(decorated_var)];
-                    auto loop_it = std::find_if(loops.begin(), loops.end(),
-                                                [&](const string &l){ return decorated_var == l; });
-                    internal_assert(loop_it != loops.end());
-                    args[std::distance(loops.begin(), loop_it)] = arg;
+                if (arg.as<Sub>()) {
+                    user_assert(!call_node.defined())
+                        << "Currently, flattening UREs is limited to a single dimension of dependency\n";
+                    Expr v = arg.as<Sub>()->a;
+                    Expr d = arg.as<Sub>()->b;
+                    internal_assert(v.as<Variable>() && is_const(d));
+                    string var = v.as<Variable>()->name;
+
+                    // Collect all sub-loops split from var
+                    std::vector<Split> sub_loops;
+                    auto splits = f.definition().schedule().splits();
+                    auto split_it = std::find_if(splits.begin(), splits.end(),
+                                                [&](const Split &s){ return var_name_match(s.old_var, extract_last_token(var)); });
+                    while (split_it != splits.end()) {
+                        sub_loops.insert(sub_loops.begin(), *split_it);
+                        split_it = std::find_if(splits.begin(), splits.end(),
+                                                [&](const Split &s){ return s.old_var == split_it->inner; });
+                    }
+                    if (sub_loops.empty()) {
+                        auto loop_it = std::find_if(loops.begin(), loops.end(),
+                                                    [&](const string &l){ return var_name_match(var, extract_last_token(l)); });
+                        internal_assert(loop_it != loops.end());
+                        args[std::distance(loops.begin(), loop_it)] = arg;
+                    }
+
+                    int lp_prod = 1;
+                    Expr lp_cond = const_true();
+                    // From the lowest to the highest level
+                    for (auto sublp : sub_loops) {
+                        auto inner_it = std::find_if(loops.begin(), loops.end(),
+                                                    [&](const string &l){ return var_name_match(sublp.inner, extract_last_token(l)); });
+                        auto outer_it = std::find_if(loops.begin(), loops.end(),
+                                                    [&](const string &l){ return var_name_match(sublp.outer, extract_last_token(l)); });
+                        internal_assert(inner_it != loops.end() && outer_it != loops.end());
+
+                        Expr inner_var = Variable::make(Int(32), *inner_it);
+                        Expr outer_var = Variable::make(Int(32), *outer_it);
+                        if (propagation_pattern) {
+                            // For propagation patterns, rewrite the dependency old_var - d as inner_var - d
+                            user_assert(!space_vars.empty())
+                                << "Please specify space loops through space_time_transform\n";
+                            auto space_it = std::find(space_vars.begin(), space_vars.end(), extract_last_token(*inner_it));
+                            if (space_it != space_vars.end()) {
+                                args[std::distance(loops.begin(), inner_it)] = inner_var - d;
+                            }
+                        } else {
+                            // Otherwise, rewrite the dependency as select(inner_var == 0, F(inner_var+factor-d, outer_var-1), F(inner_var-d))
+                            user_assert(is_const(sublp.factor))
+                                << "Split factor of loop " << sublp.old_var << " must be constant\n";
+                            int factor = *as_const_int(sublp.factor);
+                            args[std::distance(loops.begin(), inner_it)] = inner_var - d;
+                            Expr inner_expr = Call::make(op->type, op->name, args, Call::Halide);
+
+                            args[std::distance(loops.begin(), inner_it)] = inner_var + (factor / lp_prod) - d;
+                            args[std::distance(loops.begin(), outer_it)] = outer_var - 1;
+                            Expr outer_expr = Call::make(op->type, op->name, args, Call::Halide);
+
+                            if (call_node.defined()) {
+                                call_node = select(inner_var == 0 && lp_cond, outer_expr, call_node);
+                            } else {
+                                call_node = select(inner_var == 0, outer_expr, inner_expr);
+                            }
+                            lp_prod = factor;
+                            lp_cond = (inner_var == 0) && lp_cond;
+                        }
+                    }
                 }
             }
-            return Call::make(op->type, op->name, args, Call::CallType::Halide);
+            if (!call_node.defined()) {
+                // No select inserted
+                call_node = Call::make(op->type, op->name, args, Call::Halide);
+            }
+            return call_node;
         }
         return IRMutator::visit(op);
     }
@@ -430,22 +507,17 @@ public:
                                                [&](const Dim &d) { return d.var == lp; });
                     if (dim_it == all_dims.end()) continue;
                 }
-                std::vector<std::string> names = split_string(lp, ".");
-                internal_assert(names.size() <= 2);
-                std::string var_name = op->name + ".s0";
-                // If this loop is split from the original loop.
-                if (names.size() > 1) {
-                    var_name += "." + names[0];
-                    names.erase(names.begin());
-                }
+                std::string var_name = op->name + ".s0." + remove_postfix(lp, extract_last_token(lp));
+                // If this loop is split from the original loop
                 if (f.definition().schedule().is_merged()) {
-                    var_name += ".fused";
+                    var_name += "fused.";
                 }
-                var_name += "." + names[0];
+                var_name += extract_last_token(lp);
                 func_to_loops[op->name].push_back(var_name);
             }
             std::vector<Expr> values;
             for (const auto &v : op->values) {
+                propagation_pattern = v.as<Select>() && !f.definition().schedule().is_output() ? true : false;
                 values.push_back(mutate(v));
             }
             std::vector<Expr> args;

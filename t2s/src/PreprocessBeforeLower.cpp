@@ -22,6 +22,7 @@
 #include "Substitute.h"
 #include <list>
 #include <vector>
+#include "./Utilities.h"
 #include "./DebugPrint.h"
 #include "./PreprocessBeforeLower.h"
 #include "./Stensor.h"
@@ -205,7 +206,7 @@ void annotate_pipelined_loop(Func func) {
         auto func_dims = func.function().definition().schedule().dims();
         for (auto &d : func_dims) {
             if (d.for_type == ForType::Serial) {
-                func.pipeline(Var(d.var));
+                func.pipeline(Var(extract_last_token(d.var)));
                 break;
             }
         }
