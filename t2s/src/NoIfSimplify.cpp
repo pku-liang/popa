@@ -44,7 +44,7 @@ class Simplifier : public Simplify {
     // Do not propagate the simplified condition
     Stmt visit(const IfThenElse *op) override {
         Expr condition = mutate(op->condition, nullptr);
-        
+
         if (is_const_one(condition)) {
             return mutate(op->then_case);
         }
@@ -56,7 +56,6 @@ class Simplifier : public Simplify {
             }
         }
         Stmt then_case, else_case;
-
 
         then_case = mutate(op->then_case);
         if (op->else_case.defined()) {

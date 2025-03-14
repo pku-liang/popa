@@ -16,6 +16,7 @@
 *
 * SPDX-License-Identifier: BSD-2-Clause-Patent
 *******************************************************************************/
+#include "../../Halide/src/Func.h"
 #include "../../Halide/src/IRMutator.h"
 #include "../../Halide/src/IRVisitor.h"
 #include "../../Halide/src/Simplify.h"
@@ -291,6 +292,8 @@ public:
 
 class UreFlattener : public IRMutator
 {
+    const std::string &main_func_name;
+    const std::string &output_func_name;
     const std::map<string, Function> &env;
     std::vector<std::string> undecorated_loops;
     std::vector<std::string> space_vars;
@@ -303,31 +306,55 @@ class UreFlattener : public IRMutator
                 Internal::ends_with(v2, "." + v1));
     }
 
+    bool is_candidate_func(const string &fname, Function &func) {
+        if (function_is_in_environment(fname, env, func)) {
+            if (fname == main_func_name) return true;
+            Function main_func;
+            internal_assert(function_is_in_environment(main_func_name, env, main_func));
+            const auto &merged_ures = main_func.definition().schedule().merged_ures();
+            auto ure_it = std::find_if(merged_ures.begin(), merged_ures.end(),
+                                       [&](const Func &f){ return f.name() == fname; });
+            return ure_it != merged_ures.end();
+        }
+        return false;
+    }
+
 public:
     using IRMutator::visit;
-    UreFlattener(const std::map<string, Function> &_e) : env(_e) {
-        for (auto &kv : env) {
-            Function f = kv.second;
-            if (f.has_merged_defs()) {
-                auto stt_param = f.definition().schedule().transform_params();
-                if (!stt_param.empty()) {
-                    auto src_vars = stt_param[0].src_vars;
-                    auto num_space_vars = stt_param[0].num_space_vars;
-                    std::copy(src_vars.begin(), src_vars.begin() + num_space_vars, std::back_inserter(space_vars));
-                }
-            }
+    UreFlattener(const string &fname, const string &_o, const std::map<string, Function> &_e)
+        : main_func_name(fname), output_func_name(_o), env(_e) {
+        Function f;
+        internal_assert(function_is_in_environment(fname, env, f));
+        auto stt_param = f.definition().schedule().transform_params();
+        if (!stt_param.empty()) {
+            auto src_vars = stt_param[0].src_vars;
+            auto num_space_vars = stt_param[0].num_space_vars;
+            std::copy(src_vars.begin(), src_vars.begin() + num_space_vars, std::back_inserter(space_vars));
         }
     }
 
     Stmt visit(const For *op) override {
-        Function f;
-        if (function_is_in_environment(extract_first_token(op->name), env, f)
-        && f.has_merged_defs()) {
+        if (extract_first_token(op->name) == main_func_name) {
             string var = extract_after_tokens(op->name, 2);
             undecorated_loops.insert(undecorated_loops.begin(), var);
         }
         Stmt body = mutate(op->body);
         return For::make(op->name, op->min, op->extent, op->for_type, op->device_api, body);
+    }
+
+    Stmt visit(const Realize *op) override {
+        Function f;
+        if (is_candidate_func(op->name, f)) {
+            Stmt body = mutate(op->body);
+            Region bounds;
+            for (auto &l : undecorated_loops) {
+                Expr min_expr = Variable::make(Int(32), op->name + "." + l + ".min_realized");
+                Expr extent_expr = Variable::make(Int(32), op->name + "." + l + ".extent_realized");
+                bounds.push_back(Range(min_expr, extent_expr));
+            }
+            return Realize::make(op->name, op->types, op->memory_type, bounds, op->condition, body);
+        }
+        return IRMutator::visit(op);
     }
 
     Expr visit(const Select *op) override {
@@ -336,10 +363,12 @@ public:
             auto eq_a = eq->a.as<Variable>();
             if (eq_a) {
                 std::vector<string> names = split_string(eq_a->name, ".");
+                Function f;
+                if (!is_candidate_func(names[0], f)) {
+                    return IRMutator::visit(op);
+                }
                 // If the old_var is used, only three components exist (e.g., X.s0.i)
                 if (names.size() == 3) {
-                    Function f;
-                    internal_assert(function_is_in_environment(names[0], env, f));
                     std::vector<Split> sub_loops;
                     auto splits = f.definition().schedule().splits();
                     auto split_it = std::find_if(splits.begin(), splits.end(),
@@ -407,8 +436,7 @@ public:
 
     Expr visit(const Call *op) override {
         Function f;
-        if (op->call_type == Call::Halide && function_is_in_environment(op->name, env, f)
-        && (f.has_merged_defs() || f.definition().schedule().is_merged())) {
+        if (op->call_type == Call::Halide && is_candidate_func(op->name, f)) {
             const auto &loops = func_to_loops[f.name()];
             std::vector<Expr> args;
             // Fill args in the correct order
@@ -497,8 +525,7 @@ public:
 
     Stmt visit(const Provide *op) override {
         Function f;
-        if (function_is_in_environment(op->name, env, f)
-        && (f.has_merged_defs() || f.definition().schedule().is_merged())) {
+        if (is_candidate_func(op->name, f)) {
             for (auto lp : undecorated_loops) {
                 if (f.definition().schedule().is_extended_ure()) {
                     // Some dimensions are missing in extended UREs
@@ -521,8 +548,8 @@ public:
                 values.push_back(mutate(v));
             }
             std::vector<Expr> args;
-            if (f.definition().schedule().is_output()) {
-                // Do not flatten output URE
+            if (op->name == output_func_name) {
+                // Do not flatten final output
                 args = op->args;
             } else {
                 for (auto &l : func_to_loops[op->name]) {
@@ -571,14 +598,13 @@ Stmt rewrite_memory_partition(Stmt s, const std::map<string, Function> &env) {
     return s;
 }
 
-Stmt flatten_UREs(Stmt s, const std::map<string, Function> &env) {
-    UreFlattener uf(env);
-    s = uf.mutate(s);
-    // To obtain loop bounds, we simplify the IR by replacing LetStmts about loop bounds.
-    s = no_if_simplify(s, true);
-    // Collect loop bounds and replace the region of Realize nodes of UREs
-    RealizeRewriter rr(env);
-    s = rr.mutate(s);
+Stmt flatten_UREs(Stmt s, const vector<Function> &outputs, const vector<vector<string>> &fused_groups, const std::map<string, Function> &env) {
+    for (auto &group : fused_groups) {
+        user_assert(outputs.size() == 1)
+            << "Currently only a single output is allowed\n";
+        UreFlattener uf(group[0], outputs[0].name(), env);
+        s = uf.mutate(s);
+    }
     return s;
 }
 

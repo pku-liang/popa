@@ -28,7 +28,7 @@ using std::string;
 
 Stmt match_patterns(Stmt s);
 Stmt rewrite_memory_partition(Stmt s, const std::map<string, Function> &env);
-Stmt flatten_UREs(Stmt s, const std::map<string, Function> &env);
+Stmt flatten_UREs(Stmt s, const std::vector<Function> &outputs, const std::vector<std::vector<string>> &fused_groups, const std::map<string, Function> &env);
 
 }
 }

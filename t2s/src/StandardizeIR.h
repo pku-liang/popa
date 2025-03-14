@@ -88,22 +88,27 @@ public:
         }
         for_ops.push_back(op);
         Stmt body = mutate(op->body);
-        if (ends_with(op->name, ".run_on_device")) {
-            in_kernel_scope = false;
-        }
         auto target_loop = get_target_loop();
         if (op == target_loop) {
-            // Rebuild unroll loops
-            for (auto it = for_ops.rbegin(); *it != target_loop; it++) {
-                const For *cur_op = *it;
-                if (boundary_loops.find(cur_op) == boundary_loops.end()) {
-                    std::string loop_name = unique_name("dummy");
-                    body_of_if_stmt = substitute(cur_op->name, Variable::make(Int(32), loop_name), body_of_if_stmt);
-                    body_of_if_stmt = For::make(loop_name, cur_op->min, cur_op->extent, cur_op->for_type, op->device_api, body_of_if_stmt);
+            if (body.defined()) {
+                // Rebuild unroll loops
+                for (auto it = for_ops.rbegin(); *it != target_loop; it++) {
+                    const For *cur_op = *it;
+                    if (boundary_loops.find(cur_op) == boundary_loops.end()) {
+                        std::string loop_name = unique_name("dummy");
+                        body_of_if_stmt = substitute(cur_op->name, Variable::make(Int(32), loop_name), body_of_if_stmt);
+                        body_of_if_stmt = For::make(loop_name, cur_op->min, cur_op->extent, cur_op->for_type, op->device_api, body_of_if_stmt);
+                    }
                 }
+                body = For::make(op->name, op->min, op->extent, op->for_type, op->device_api, body);
+                return Block::make(body, body_of_if_stmt);
+            } else {
+                return body_of_if_stmt;
             }
-            body = For::make(op->name, op->min, op->extent, op->for_type, op->device_api, body);
-            return Block::make(body, body_of_if_stmt);
+        }
+        if (ends_with(op->name, ".run_on_device")) {
+            in_kernel_scope = false;
+            for_ops.clear();
         }
         return For::make(op->name, op->min, op->extent, op->for_type, op->device_api, body);
     }

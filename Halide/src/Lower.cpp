@@ -205,8 +205,12 @@ void lower_impl(const vector<Function> &output_funcs,
     LoopBounds global_bounds = compute_global_loop_bounds(s);
 
     debug(1) << "Flatten UREs and rewrite dependencies...\n";
-    s = flatten_UREs(s, env);
+    s = flatten_UREs(s, outputs, fused_groups, env);
     log("Lowering after flattening UREs:", s);
+
+    debug(1) << "Simplifying the initial loop nests\n";
+    s = no_if_simplify(s, true);
+    log("Lowering after simplifying:", s);
 
     debug(1) << "Applying space time transformation...\n";
     std::map<std::string, RegBound > reg_size_map;
@@ -589,7 +593,7 @@ void lower_impl(const vector<Function> &output_funcs,
     debug(1) << "Removing dead allocations and moving loop invariant code...\n";
     s = remove_dead_allocations(s);
     s = simplify(s);
-    s = hoist_loop_invariant_values(s);
+    // s = hoist_loop_invariant_values(s);
     s = hoist_loop_invariant_if_statements(s);
     log("Lowering after removing dead allocations and hoisting loop invariants:", s);
 
@@ -613,9 +617,9 @@ void lower_impl(const vector<Function> &output_funcs,
     s = do_late_fuse(s, env);
     log("Lowering after late fuse:\n", s);
 
-    debug(1) << "Promoting channels...\n";
-    s = channel_promotion(s);
-    log("Lowering after channel promotion:", s);
+    // debug(1) << "Promoting channels...\n";
+    // s = channel_promotion(s);
+    // log("Lowering after channel promotion:", s);
 
     // For overlay, we don't need to flatten task loops.
     // char *overlay_num = getenv("HL_OVERLAY_NUM");
@@ -629,13 +633,13 @@ void lower_impl(const vector<Function> &output_funcs,
     s = flatten_tirangualr_loop_nest(s, env);
     log("Lowering after triangular loop optimizing:", s);
 
-    if (getenv("DISABLE_AUTORUN") == NULL) {
-        if (t.has_fpga_feature()) {
-            debug(1) << "Making device funcs as autorun ...\n";
-            s = autorun_kernels(s, env);
-            log("Lowering after making device funcs as autorun:", s);
-        }
-    }
+    // if (getenv("DISABLE_AUTORUN") == NULL) {
+    //     if (t.has_fpga_feature()) {
+    //         debug(1) << "Making device funcs as autorun ...\n";
+    //         s = autorun_kernels(s, env);
+    //         log("Lowering after making device funcs as autorun:", s);
+    //     }
+    // }
 
     debug(1) << "Creating overlay scheduler...\n";
     s = simplify(create_overlay_schedule(s, env));
