@@ -19,8 +19,7 @@
 #ifndef T2S_STENSOR_H
 #define T2S_STENSOR_H
 
-#include "../../Halide/src/Var.h"
-#include "../../Halide/src/ImageParam.h"
+#include "../../Halide/src/Func.h"
 
 namespace Halide {
 
@@ -42,7 +41,7 @@ struct Stensor
     vector<Var> v_banks;
     vector<Var> v_outs;
     vector<Expr> dims;
-    int schain_idx = -1;
+    int schain_belongs_to = -1;
     int fifo_depth = 0;
     bool transposed = false;
 
@@ -53,9 +52,7 @@ struct Stensor
     Stensor(void)
         : Stensor(unique_name("s"), HOST) {}
 
-    Func stensor_realize_wrapper(const Target &t);
-    Func get_wrapper_func();
-    static void realize(const Target &t);
+    Func get_wrapper_func(const Target &t = Target());
     void realize(Buffer<> dst, const Target &t);
     void compile_jit(const Target &t);
     void compile_to_host(string file_name, const vector<Argument> &args,
@@ -88,11 +85,11 @@ struct Stensor
 };
 
 void operator>>(Stensor &s, const vector<FuncOrStensor> &fs);
-void operator>>(const ImageParam &im, const vector<FuncOrStensor> &fs);
-void operator>>(const vector<ImageParam> &im, const vector<FuncOrStensor> &fs);
+void operator>>(const FuncOrExpr &im, const vector<FuncOrStensor> &fs);
+void operator>>(const vector<FuncOrExpr> &im, const vector<FuncOrStensor> &fs);
 void operator>>(Stensor &s, Func &f);
-Stensor &operator>>(const ImageParam &im, Stensor &s);
-Stensor &operator>>(const vector<ImageParam> &im, Stensor &s);
+Stensor &operator>>(const FuncOrExpr &in_expr, Stensor &s);
+Stensor &operator>>(const vector<FuncOrExpr> &in_expr, Stensor &s);
 Stensor &operator>>(Func &f, Stensor &s);
 
 struct FuncOrStensor {

@@ -32,15 +32,14 @@ using std::map;
 using std::string;
 
 struct Schain {
-    bool is_output;                 // Output chain needs different primitives
+    bool is_output;                 // Output chain requires specifying different primitives
     Func outf;                      // The output chain starts from a function
-    Stensor fork_from;              // The input chain starts from another stensor
-    vector<ImageParam> imp;         // The input chain starts from external inputs
+    Stensor fork_from;              // The input chain starts from the other stensor
+    vector<FuncOrExpr> imp_expr;    // The input chain starts from existing expressions
     vector<Stensor> stensors;
     vector<Func> funcs;
 };
 vector<Schain> schains;
-Target target = Target();
 
 Stensor &Stensor::scope(Var v) {
     v_scope = v;
@@ -92,9 +91,9 @@ int find_stensor(string name, Stensor &ret) {
 }
 
 Stensor &Stensor::operator>>(Stensor &s) {
-    int c = this->schain_idx;
+    int c = this->schain_belongs_to;
     if (c >= 0) {
-        s.schain_idx = c;
+        s.schain_belongs_to = c;
         schains[c].stensors.push_back(s);
         return schains[c].stensors.back();
     } else {
@@ -104,8 +103,8 @@ Stensor &Stensor::operator>>(Stensor &s) {
         Stensor producer;
         internal_assert(find_stensor(s.producer, producer) >= 0);
         Schain tmp;
-        s.schain_idx = schains.size();
-        tmp.is_output = schains[producer.schain_idx].is_output;
+        s.schain_belongs_to = schains.size();
+        tmp.is_output = schains[producer.schain_belongs_to].is_output;
         tmp.fork_from = producer;
         tmp.stensors.push_back(*this);
         tmp.stensors.push_back(s);
@@ -115,40 +114,36 @@ Stensor &Stensor::operator>>(Stensor &s) {
     return schains[c].stensors.back();
 }
 
-Stensor &operator>>(const vector<ImageParam> &im, Stensor &s) {
+Stensor &operator>>(const vector<FuncOrExpr> &in, Stensor &s) {
     Schain tmp;
-    s.schain_idx = schains.size();
-    tmp.is_output = false;
-    tmp.imp = im;
+    s.schain_belongs_to = schains.size();
+    for (const auto &e : in) {
+        tmp.imp_expr.emplace_back(e);
+    }
     tmp.stensors.push_back(s);
     schains.push_back(std::move(tmp));
     return schains.back().stensors.back();
 }
 
-void operator>>(const vector<ImageParam> &im, const vector<FuncOrStensor> &fs) {
+void operator>>(const vector<FuncOrExpr> &in, const vector<FuncOrStensor> &fs) {
     // Create a new chain for every stensor in fs
     for (size_t i = 0; i < fs.size(); i++) {
-        Schain tmp;
         internal_assert(fs[i].stensor);
-        fs[i].stensor->schain_idx = schains.size();
-        tmp.is_output = false;
-        tmp.imp = im;
-        tmp.stensors.push_back(*(fs[i].stensor));
-        schains.push_back(std::move(tmp));
+        in >> (*fs[i].stensor);
     }
 }
 
 void operator>>(Stensor &s, Func &f) {
-    if (s.schain_idx >= 0) {
-        auto &sc = schains[s.schain_idx];
+    if (s.schain_belongs_to >= 0) {
+        auto &sc = schains[s.schain_belongs_to];
         sc.outf = f;
     } else {
         internal_assert(!s.producer.empty());
         Stensor producer;
         internal_assert(find_stensor(s.producer, producer) >= 0);
         Schain tmp;
-        s.schain_idx = schains.size();
-        tmp.is_output = schains[producer.schain_idx].is_output;
+        s.schain_belongs_to = schains.size();
+        tmp.is_output = schains[producer.schain_belongs_to].is_output;
         tmp.fork_from = producer;
         tmp.stensors.push_back(s);
         tmp.outf = f;
@@ -179,17 +174,13 @@ void operator>>(Stensor &s, const vector<FuncOrStensor> &fs) {
     }
 }
 
-Stensor &operator>>(const ImageParam &im, Stensor &s) {
-    return vector<ImageParam>{im} >> s;
-}
-
-void operator>>(const ImageParam &im, const vector<FuncOrStensor> &fs) {
-    vector<ImageParam>{im} >> fs;
+Stensor &operator>>(const FuncOrExpr &in, Stensor &s) {
+    return vector<FuncOrExpr>{in} >> s;
 }
 
 Stensor &operator>>(Func &f, Stensor &s) {
     Schain tmp;
-    s.schain_idx = schains.size();
+    s.schain_belongs_to = schains.size();
     tmp.is_output = true;
     tmp.outf = f;
     tmp.stensors.push_back(s);
@@ -197,7 +188,7 @@ Stensor &operator>>(Func &f, Stensor &s) {
     return schains.back().stensors.back();
 }
 
-struct FindVars
+struct VariableFinder
 {
     vector<Func> ures;
     map<string, vector<Var>> all_free_vars;      // Variables appeared in the function definition
@@ -225,16 +216,16 @@ struct FindVars
         return this->exists(vector<Var>{v});
     }
 
-    vector<VarOrRVar> find_reuse_vars(string imp, Var scope, Func func = Func()) {
+    vector<VarOrRVar> find_reuse_vars(string name, Var scope, Func func = Func()) {
         vector<VarOrRVar> reuse_vars;
         auto &used_vars = fuv.used_vars;
-        internal_assert(used_vars.count(imp) > 0);
+        internal_assert(used_vars.count(name) > 0);
         func = find_main_ure(func);
         for (Var v : all_free_vars[func.name()]) {
             if (v.same_as(scope)) {
                 break;
             }
-            if (used_vars[imp].count(v.name()) == 0) {
+            if (used_vars[name].count(v.name()) == 0) {
                 reuse_vars.push_back(Var(v));
             }
         }
@@ -291,31 +282,37 @@ struct FindVars
     // Find variables appeared in the arguments of inputs
     class FindUsedVars : public IRVisitor
     {
-        string image_param;
+        string call_name;
     public:
         using IRVisitor::visit;
         map<string, vector<Expr>> access_indexes;
         map<string, std::set<string>> used_vars;
 
         void visit(const Variable *op) override {
-            if (!image_param.empty()) {
-                used_vars[image_param].insert(op->name);
+            if (!call_name.empty()) {
+                used_vars[call_name].insert(op->name);
             }
         }
 
         void visit(const Call *op) override {
+            // ImageParam
             if (ends_with(op->name, "_im")) {
-                image_param = remove_postfix(op->name, "_im");
-                access_indexes[image_param] = op->args;
-                for (size_t i = 0; i < op->args.size(); i++) {
-                    op->args[i].accept(this);
-                }
-                image_param.clear();
+                call_name = remove_postfix(op->name, "_im");
+                access_indexes[call_name] = op->args;
             }
+            // Buffer
+            if (op->call_type == Call::CallType::Image) {
+                call_name = op->name;
+                access_indexes[call_name] = op->args;
+            }
+            for (size_t i = 0; i < op->args.size(); i++) {
+                op->args[i].accept(this);
+            }
+            call_name.clear();
         }
     } fuv;
 
-    FindVars(const map<string, Func> &env) {
+    VariableFinder(const map<string, Func> &env) {
         for (auto &p : env) {
             const Func &f = p.second;
             f.value().accept(&fuv);
@@ -361,18 +358,29 @@ public:
 class RealizeOnFPGA
 {
     vector<Var> output_array_dims;
-    FindVars &fv;
+    VariableFinder &fv;
     FindProducerForOutput &fpo;
 
-    void isolate_producer(Schain &c) {
-        if (!c.imp.empty() && c.stensors[0].position != HOST) {
-            // The device stensors needs serialized inputs
-            // If the host stensor is not specified, we automatically generate it
-            string host_name = c.imp[0].name() + (c.outf.defined() ? "_" + c.outf.name() : "") + "_serializer";
-            Stensor s_host(host_name);
-            s_host.schain_idx = c.stensors[0].schain_idx;
-            c.stensors.insert(c.stensors.begin(), s_host);
+    string get_name(FuncOrExpr e) {
+        if (e.is_image) {
+            return e.image->name();
         }
+        if (e.is_expr) {
+            internal_assert(e.expr.as<Call>());
+            return e.expr.as<Call>()->name;
+        }
+        return e.func->name();
+    }
+
+    void isolate_producer(Schain &c) {
+        // if (!c.imp_expr.empty() && c.stensors[0].position != HOST) {
+        //     // The device stensors requires serialized inputs
+        //     // If the host stensor is not specified, we automatically generate it
+        //     string host_name = get_name(c.imp_expr[0]) + (c.outf.defined() ? "_" + c.outf.name() : "") + "_serializer";
+        //     Stensor s_host(host_name);
+        //     s_host.schain_belongs_to = c.stensors[0].schain_belongs_to;
+        //     c.stensors.insert(c.stensors.begin(), s_host);
+        // }
         vector<Func> producers;
         for (auto &s : c.stensors) {
             Place place = s.position == SMemType::HOST ? Place::Host : Place::Device;
@@ -382,10 +390,11 @@ class RealizeOnFPGA
                      << (place == Place::Host ? "Place::Host" : "Place::Device") << ");\n";
         }
 
-        if (c.imp.empty()) {
-            int ori_chain = c.fork_from.schain_idx;
-            auto imp = schains[ori_chain].imp;
-            internal_assert(!imp.empty());
+        if (c.imp_expr.empty()) {
+            // Get imp_expr from its fork_from stensor
+            int ori_chain = c.fork_from.schain_belongs_to;
+            auto ori_imp_expr = schains[ori_chain].imp_expr;
+            internal_assert(!ori_imp_expr.empty());
 
             auto &funcs = schains[ori_chain].funcs;
             Func fork_func;
@@ -396,21 +405,18 @@ class RealizeOnFPGA
                 }
             }
             internal_assert(fork_func.defined());
-            vector<FuncOrExpr> imp_expr;
-            std::copy(imp.begin(), imp.end(), std::back_inserter(imp_expr));
+            // Current chain inherits imp_expr from fork_from stensor and this stensor itself
             auto func = fv.find_main_ure(c.outf);
             auto tmp_producers = producers;
             tmp_producers.insert(tmp_producers.begin(), fork_func);
-            func.isolate_producer_chain(imp_expr, tmp_producers);
+            func.isolate_producer_chain(ori_imp_expr, tmp_producers);
             debug(1) << "T2X emits: " << func.name() << ".isolate_producer_chain("
-                     << names_to_string(imp) << ", " << names_to_string(tmp_producers) << ");\n";
+                     << names_to_string(ori_imp_expr) << ", " << names_to_string(tmp_producers) << ");\n";
         } else {
-            vector<FuncOrExpr> imp_expr;
-            std::copy(c.imp.begin(), c.imp.end(), std::back_inserter(imp_expr));
             auto func = fv.find_main_ure(c.outf);
-            func.isolate_producer_chain(imp_expr, producers);
+            func.isolate_producer_chain(c.imp_expr, producers);
             debug(1) << "T2X emits: " << func.name() << ".isolate_producer_chain("
-                     << names_to_string(c.imp) << ", " << names_to_string(producers) << ");\n";
+                     << names_to_string(c.imp_expr) << ", " << names_to_string(producers) << ");\n";
         }
         c.funcs = producers;
     }
@@ -484,14 +490,8 @@ class RealizeOnFPGA
         Var scope = c.stensors.back().v_scope;
 
         for (int i = producers.size()-2; i >= 0; i--) {
-            ImageParam im;
-            if (!c.imp.empty()) {
-                im = c.imp[0];
-            } else {
-                int ori_chain = c.fork_from.schain_idx;
-                im = schains[ori_chain].imp[0];
-            }
-            loops = fv.find_reuse_vars(im.name(), scope, c.outf);
+            string name = get_name(c.imp_expr.empty() ? schains[c.fork_from.schain_belongs_to].imp_expr[0] : c.imp_expr[0]);
+            loops = fv.find_reuse_vars(name, scope, c.outf);
             producers[i].remove(loops);
             debug(1) << "T2X emits: " << producers[i].name() << ".remove("
                      << names_to_string(loops) << ");\n";
@@ -526,7 +526,7 @@ class RealizeOnFPGA
                 Stensor tmp;
                 int j = find_stensor(c.stensors[i].producer, tmp);
                 if (j >= 0) {
-                    prev = schains[c.fork_from.schain_idx].funcs[j];
+                    prev = schains[c.fork_from.schain_belongs_to].funcs[j];
                     prev_dims = tmp.v_banks;
                 } else {
                     internal_assert(position != SRAM);
@@ -599,17 +599,13 @@ class RealizeOnFPGA
                     Stensor tmp;
                     int j = find_stensor(c.stensors[i].producer, tmp);
                     internal_assert(j >= 0);
-                    prev = schains[c.fork_from.schain_idx].funcs[j];
+                    prev = schains[c.fork_from.schain_belongs_to].funcs[j];
                 }
                 if (c.stensors[i].transposed) {
                     // Insert an addressable buffer. Get the access index first
-                    auto imp = c.imp;
-                    if (imp.empty()) {
-                        int ori_chain = c.fork_from.schain_idx;
-                        imp = schains[ori_chain].imp;
-                    }
-                    internal_assert(imp.size() == 1);
-                    auto args = fv.get_access_index(imp[0].name(), v_scope, c.outf);
+                    const auto &imp_expr = c.imp_expr.empty() ? schains[c.fork_from.schain_belongs_to].imp_expr : c.imp_expr;
+                    internal_assert(imp_expr.size() == 1);
+                    auto args = fv.get_access_index(get_name(imp_expr[0]), v_scope, c.outf);
                     internal_assert(args.size() == 2);
                     vector<Expr> transposed_args = { args[1], args[0] };
 
@@ -696,10 +692,10 @@ class RealizeOnFPGA
                     internal_assert(ext_node);
                     int num_banks = (ext_node->value * type.bits()) / 512;
                     if (num_banks > 1 && v_width.name() == main_ure.function().definition().schedule().dims()[0].var) {
-                        internal_assert(c.imp.size() == 1);
-                        funcs[i-1].partition(c.imp[0], funcs[i], v_width, num_banks);
+                        internal_assert(c.imp_expr.size() == 1);
+                        funcs[i-1].partition(c.imp_expr[0], funcs[i], v_width, num_banks);
                         debug(1) << "T2X emits: " << funcs[i-1].name() << ".partition("
-                                << c.imp[0].name() << ", " << funcs[i].name() << ", "
+                                << get_name(c.imp_expr[0]) << ", " << funcs[i].name() << ", "
                                 << v_width.name() << ", " << num_banks << ");\n";
                     }
                 }
@@ -816,7 +812,7 @@ class RealizeOnFPGA
     }
 
 public:
-    RealizeOnFPGA(FindVars &_v, FindProducerForOutput &_p)
+    RealizeOnFPGA(VariableFinder &_v, FindProducerForOutput &_p)
         : fv(_v), fpo(_p) {}
 
     void realize() {
@@ -826,7 +822,7 @@ public:
             if (!c.is_output) {
                 isolate_producer(c);
                 remove(c);
-                set_triangular_bound(c);
+                // set_triangular_bound(c);
                 scatter(c);
                 buffer(c);
                 vectorize(c);
@@ -834,7 +830,7 @@ public:
                 min_depth(c);
             } else {
                 isolate_consumer(c);
-                set_triangular_bound(c);
+                // set_triangular_bound(c);
                 gather(c);
                 vectorize(c);
                 partition(c);
@@ -846,7 +842,7 @@ public:
 
 class RealizeOnGPU
 {
-    FindVars &fv;
+    VariableFinder &fv;
     int num_gpu_vars;
 
     // Check if the stensors are inclusive cache
@@ -879,15 +875,13 @@ class RealizeOnGPU
             // Currently, we separately allocate registers in each thread, and view registers
             // throughout threads as an unified SRAM storage, to realize stensors on GPUs.
             if (s.position == SRAM) {
-                for (auto &p : c.imp) {
-                    Func f = fv.ures[0];
-                    auto free_vars = fv.all_free_vars[f.name()];
-                    int gpu_var_index = free_vars.size() - num_gpu_vars -1;
-                    Var loop = fv.var_index(s.v_scope) < gpu_var_index ? s.v_scope : free_vars[gpu_var_index];
-                    f.gpu_fetch(loop, MemoryType::Register, s.v_outs, {});
-                    debug(1) << "T2X emits: " << p.name() << ".gpu_fetch("
-                             << loop.name() << ", {" << names_to_string(s.v_outs) << "});\n";
-                }
+                Func f = fv.ures[0];
+                auto free_vars = fv.all_free_vars[f.name()];
+                int gpu_var_index = free_vars.size() - num_gpu_vars -1;
+                Var loop = fv.var_index(s.v_scope) < gpu_var_index ? s.v_scope : free_vars[gpu_var_index];
+                f.gpu_fetch(loop, MemoryType::Register, s.v_outs, {});
+                debug(1) << "T2X emits: " << f.name() << ".gpu_fetch("
+                            << loop.name() << ", {" << names_to_string(s.v_outs) << "});\n";
             }
         }
     }
@@ -909,7 +903,7 @@ class RealizeOnGPU
     }
 
 public:
-    RealizeOnGPU(FindVars &_f, int _n)
+    RealizeOnGPU(VariableFinder &_f, int _n)
         : fv(_f), num_gpu_vars(_n) {}
 
     Func realize() {
@@ -939,21 +933,15 @@ Stensor &operator>>(Stensor &s, const FIFO &fifo) {
     return s;
 }
 
-void Stensor::realize(const Target &t) {
+void realize_stensor(const Target &t) {
     map<string, Func> env;
     user_assert(schains.back().is_output)
         << "Please specify an output path as the last stensor chain\n";
-    target = t;
     Func outf = schains.back().outf;
     env = outf.pipeline().compute_environment();
 
     Func f;
-    if (t.has_fpga_feature()) {
-        FindVars fv(env);
-        FindProducerForOutput fpo(env);
-        RealizeOnFPGA fpga(fv, fpo);
-        fpga.realize();
-    } else {
+    if (t.has_gpu_feature()) {
         int num_gpu_vars = 0;
         for (auto &p : env) {
             if (p.second.function().place() == Place::Device) {
@@ -962,33 +950,20 @@ void Stensor::realize(const Target &t) {
             }
             reorder_gpu_loops(p.second, num_gpu_vars);
         }
-        FindVars fv(env);
+        VariableFinder fv(env);
         RealizeOnGPU gpu(fv, num_gpu_vars);
         gpu.realize();
+    } else {
+        VariableFinder fv(env);
+        FindProducerForOutput fpo(env);
+        RealizeOnFPGA fpga(fv, fpo);
+        fpga.realize();
     }
 }
 
-Func Stensor::get_wrapper_func() {
-    user_assert(target.has_gpu_feature() || target.has_fpga_feature())
-        << "Please apply Stensor::realize(target) before getting its wrapper function.\n";
-    int c = this->schain_idx;
-    auto &sc = schains[c];
-    for (size_t i = 0; i < sc.stensors.size(); ++i) {
-        if (sc.stensors[i].name == this->name) {
-            if (target.has_gpu_feature()) {
-                return sc.outf;
-            } else {
-                internal_assert(target.has_fpga_feature());
-                return sc.funcs[i];
-            }
-        }
-    }
-    return Func();
-}
-
-Func Stensor::stensor_realize_wrapper(const Target &t) {
+Func realize_and_get_output(const Target &t) {
     Func f;
-    realize(t);
+    realize_stensor(t);
     for (auto &sc : schains) {
         if (sc.is_output) {
             internal_assert(!f.defined());
@@ -1004,19 +979,35 @@ Func Stensor::stensor_realize_wrapper(const Target &t) {
     return f;
 }
 
+Func Stensor::get_wrapper_func(const Target &t) {
+    realize_stensor(t);
+    int c = this->schain_belongs_to;
+    auto &sc = schains[c];
+    for (size_t i = 0; i < sc.stensors.size(); ++i) {
+        if (sc.stensors[i].name == this->name) {
+            if (t.has_gpu_feature()) {
+                return sc.outf;
+            } else {
+                return sc.funcs[i];
+            }
+        }
+    }
+    return Func();
+}
+
 void Stensor::realize(Buffer<> dst, const Target &t) {
-    Func f = stensor_realize_wrapper(t);
+    Func f = realize_and_get_output(t);
     f.realize(dst, t);
 }
 
 void Stensor::compile_jit(const Target &t) {
-    Func f = stensor_realize_wrapper(t);
+    Func f = realize_and_get_output(t);
     f.compile_jit(t);
 }
 
 void Stensor::compile_to_host(string file_name, const vector<Argument> &args,
                               const std::string fn_name, const Target &t) {
-    Func f = stensor_realize_wrapper(t);
+    Func f = realize_and_get_output(t);
     f.compile_to_host(file_name, args, fn_name, t);
 }
 
