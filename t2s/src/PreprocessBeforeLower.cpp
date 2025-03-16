@@ -221,7 +221,7 @@ void t2s_preprocess_before_lower(map<string, Func> &env, const Target &target) {
 
         // In the function, for loops marked as removed, make their extents as 1. For the
         // calls of the function, later we will fix their args corresponding to the loops.
-        convert_removed_loops_to_unit_loops(func);
+        // convert_removed_loops_to_unit_loops(func);
 
         // GPU-specific transforms
         if (target.has_gpu_feature()) {

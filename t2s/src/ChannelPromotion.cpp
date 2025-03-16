@@ -555,7 +555,7 @@ class ChannelPromotor : public IRMutator {
     }
 };
 
-Stmt channel_promotion(Stmt s) {
+Stmt hoist_channels_out_of_unroll_loops(Stmt s) {
     VarsFinder vf;
     ChannelVisitor cv(vf);
     ChannelPromotor cp(cv);

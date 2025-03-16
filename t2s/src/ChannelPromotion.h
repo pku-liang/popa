@@ -37,7 +37,7 @@ namespace Halide {
 namespace Internal {
 
 /* Promote channels */
-extern Stmt channel_promotion(Stmt s);
+extern Stmt hoist_channels_out_of_unroll_loops(Stmt s);
 
 }
 }

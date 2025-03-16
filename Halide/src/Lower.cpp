@@ -260,9 +260,9 @@ void lower_impl(const vector<Function> &output_funcs,
     // This uniquifies the variable names, so we're good to simplify
     // after this point. This lets later passes assume syntactic
     // equivalence means semantic equivalence.
-    debug(1) << "Uniquifying variable names...\n";
-    s = uniquify_variable_names(s);
-    log("Lowering after uniquifying variable names:", s);
+    // debug(1) << "Uniquifying variable names...\n";
+    // s = uniquify_variable_names(s);
+    // log("Lowering after uniquifying variable names:", s);
 
     debug(1) << "Partitioning loops to simplify boundary conditions...\n";
     s = partition_loops(s);
@@ -566,9 +566,9 @@ void lower_impl(const vector<Function> &output_funcs,
     debug(1) << "Simplifying...\n";
     s = common_subexpression_elimination(s);
 
-    // debug(1) << "Matching compute patterns...\n";
-    // s = match_patterns(s);
-    // log("Lowering after matching patterns:", s);
+    debug(1) << "Matching and rewriting compute patterns...\n";
+    s = match_and_rewrite_patterns(s, env);
+    log("Lowering after rewriting patterns:", s);
 
     // if (t.has_fpga_feature()) {
     //     debug(1) << "Inserting FPGA register calls\n";
@@ -617,9 +617,9 @@ void lower_impl(const vector<Function> &output_funcs,
     s = do_late_fuse(s, env);
     log("Lowering after late fuse:\n", s);
 
-    // debug(1) << "Promoting channels...\n";
-    // s = channel_promotion(s);
-    // log("Lowering after channel promotion:", s);
+    // debug(1) << "Hoisting channels out of unroll loops...\n";
+    // s = hoist_channels_out_of_unroll_loops(s);
+    // log("Lowering after hoisting channels:", s);
 
     // For overlay, we don't need to flatten task loops.
     // char *overlay_num = getenv("HL_OVERLAY_NUM");

@@ -562,33 +562,87 @@ public:
     }
 };
 
-class RealizeRewriter : public IRMutator
-{
-    Region loop_bounds;
+class OutputRewriter : public IRMutator {
+    bool in_URE_scope = false;
     const std::map<string, Function> &env;
+    std::vector<const For*> for_ops;
+    std::set<const For*> boundary_loops;
+    Stmt body_of_if_stmt;
+
+    const For* get_hoisting_under_loop() {
+        for (auto l : for_ops) {
+            if (boundary_loops.find(l) != boundary_loops.end())
+                return l;
+        }
+        return nullptr;
+    }
+
 public:
     using IRMutator::visit;
-    RealizeRewriter(const std::map<string, Function> &_e) : env(_e) {}
+    OutputRewriter(const std::map<string, Function> &_e) : env(_e) {}
 
-    Stmt visit(const Realize *op) override {
+    Stmt visit(const ProducerConsumer *op) override {
         Function f;
-        if (function_is_in_environment(op->name, env, f)
-        && (f.has_merged_defs() || f.definition().schedule().is_merged())) {
-            Stmt body = mutate(op->body);
-            internal_assert(!loop_bounds.empty());
-            return Realize::make(op->name, op->types, op->memory_type, loop_bounds, op->condition, body);
+        if (op->is_producer && function_is_in_environment(op->name, env, f)) {
+            if (f.has_merged_defs()) {
+                in_URE_scope = true;
+                Stmt body = mutate(op->body);
+                in_URE_scope = false;
+                for_ops.clear();
+                boundary_loops.clear();
+                body_of_if_stmt = Stmt();
+                return ProducerConsumer::make(op->name, op->is_producer, body);
+            }
         }
         return IRMutator::visit(op);
     }
 
     Stmt visit(const For *op) override {
-        Function f;
-        if (function_is_in_environment(extract_first_token(op->name), env, f)
-        && f.has_merged_defs()) {
-            loop_bounds.insert(loop_bounds.begin(), Range(op->min, op->extent));
+        if (in_URE_scope) {
+            for_ops.push_back(op);
+            Stmt body = mutate(op->body);
+
+            auto hoisting_under = get_hoisting_under_loop();
+            if (op == hoisting_under) {
+                internal_assert(body_of_if_stmt.defined());
+                // Rebuild every loop below the hoisting_under loop
+                for (auto it = for_ops.rbegin(); *it != hoisting_under; it++) {
+                    const For *cur_op = *it;
+                    if (boundary_loops.find(cur_op) == boundary_loops.end()) {
+                        std::string loop_name = cur_op->name + "_1";
+                        body_of_if_stmt = substitute(cur_op->name, Variable::make(Int(32), loop_name), body_of_if_stmt);
+                        body_of_if_stmt = For::make(loop_name, cur_op->min, cur_op->extent, cur_op->for_type, op->device_api, body_of_if_stmt);
+                    }
+                }
+                body = For::make(op->name, op->min, op->extent, op->for_type, op->device_api, body);
+                return Block::make(body, body_of_if_stmt);
+            }
+            return For::make(op->name, op->min, op->extent, op->for_type, op->device_api, body);
         }
-        Stmt body = mutate(op->body);
-        return For::make(op->name, op->min, op->extent, op->for_type, op->device_api, body);
+        return IRMutator::visit(op);
+    }
+
+    Stmt visit(const IfThenElse *op) override {
+        if (in_URE_scope) {
+            // Check if this condition guards the write_channel call
+            auto eval = op->then_case.as<Evaluate>();
+            if (eval && eval->value.as<Call>()) {
+                internal_assert(eval->value.as<Call>()->is_intrinsic(Call::write_channel));
+                auto conjuction = break_logic_into_conjunction(op->condition);
+                for (auto c : conjuction) {
+                    auto eq = c.as<EQ>();
+                    internal_assert(eq);
+                    auto eq_a = eq->a.as<Variable>();
+                    internal_assert(eq_a);
+                    auto it = std::find_if(for_ops.begin(), for_ops.end(), [&](const For *lp){ return lp->name == eq_a->name; });
+                    boundary_loops.insert(*it);
+                }
+                internal_assert(!op->else_case.defined());
+                body_of_if_stmt = op->then_case;
+                return Stmt();
+            }
+        }
+        return IRMutator::visit(op);
     }
 };
 
@@ -608,9 +662,11 @@ Stmt flatten_UREs(Stmt s, const vector<Function> &outputs, const vector<vector<s
     return s;
 }
 
-Stmt match_patterns(Stmt s) {
-    InnerProductMatcher ipm;
-    s = ipm.mutate(s);
+Stmt match_and_rewrite_patterns(Stmt s, const std::map<string, Function> &env) {
+    // InnerProductMatcher ipm;
+    // s = ipm.mutate(s);
+    OutputRewriter out_rw(env);
+    s = out_rw.mutate(s);
     return s;
 }
 

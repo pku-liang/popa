@@ -30,7 +30,7 @@
 #include "Bounds.h"
 #include "Substitute.h"
 #include "./DebugPrint.h"
-
+#include "./Utilities.h"
 #include "./LoopRemoval.h"
 
 
@@ -95,8 +95,19 @@ public:
     }
 
     Stmt visit(const For *op) override {
-        if(!ends_with(op->name,".run_on_device")){
+        if (!ends_with(op->name,".run_on_device")){
             loop2min[op->name] = op->min;
+            internal_assert(!func_name.empty());
+            const Function &f = env.at(func_name);
+            string loop_name = extract_after_tokens(op->name, 2);
+
+            const auto &removed_loops = f.definition().schedule().remove_params();
+            auto loop_it = std::find(removed_loops.begin(), removed_loops.end(), loop_name);
+            if (loop_it != removed_loops.end()) {
+                // Covert the removed loop to unit loop
+                Stmt body = mutate(op->body);
+                return For::make(op->name, op->min, 1, op->for_type, op->device_api, body);
+            }
         }
         return IRMutator::visit(op);
     }

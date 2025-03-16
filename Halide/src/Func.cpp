@@ -2302,7 +2302,7 @@ void Func::apply_same_loop_transform_to_merged_ures() {
     for (auto merged_f : func.definition().schedule().merged_ures()) {
         vector<Dim> &merged_dims = merged_f.func.definition().schedule().dims();
         bool done = false;
-        for (size_t k = 0; k < func_dims.size(); ++k)
+        for (size_t k = 0; k < func_dims.size(); ++k) {
             for (size_t i = 0; i < merged_dims.size(); ++i) {
                 if (merged_dims[i].var == func_dims[k].var) {
                     auto for_type = func_dims[k].for_type;
@@ -2316,6 +2316,7 @@ void Func::apply_same_loop_transform_to_merged_ures() {
                     break;
                 }
             }
+        }
         internal_assert(done) << "Found no matched loop variable in a merged URE " << merged_f.name() << ".\n";
     }
 }

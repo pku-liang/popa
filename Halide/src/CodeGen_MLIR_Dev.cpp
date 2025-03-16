@@ -595,7 +595,9 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Or *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Not *op) {
-    value = codegen(EQ::make(op->a, make_zero(op->a.type())));
+    mlir::Type boolType = builder.getI1Type();
+    mlir::Value boolTrue = builder.create<mlir::arith::ConstantOp>(builder.getUnknownLoc(), boolType, builder.getBoolAttr(true));
+    value = builder.create<mlir::arith::XOrIOp>(builder.getUnknownLoc(), codegen(op->a), boolTrue);
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Select *op) {
@@ -741,12 +743,21 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Call *op) {
         internal_assert(name);
         mlir::Value buffer = sym_get(name->value);
         mlir::SmallVector<mlir::Value> args;
-        for (size_t i = 1; i < op->args.size()-1; i++) {
+        for (size_t i = 2; i < op->args.size(); i++) {
             args.push_back(get_affine_index(op->args[i]));
         }
         args.push_back(get_affine_index(0));
-        mlir::Value value = codegen(op->args.back());
+        mlir::Value value = codegen(op->args[1]);
         builder.create<mlir::AffineStoreOp>(value, buffer, args);
+    } else if (ends_with(op->name, ".ibuffer") || ends_with(op->name, ".temp")) {
+        mlir::Value buffer = sym_get(op->name);
+        mlir::SmallVector<mlir::Value> args;
+        for (size_t i = 0; i < op->args.size(); i++) {
+            mlir::Value index = codegen(op->args[i]);
+            index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), index);
+            args.push_back(index);
+        }
+        value = builder.create<mlir::memref::LoadOp>(mlir_type_of(op->type), buffer, args);
     } else {
         internal_error << "Call to " << op->name << " not implemented\n";
     }
@@ -862,7 +873,17 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Store *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Provide *op) {
-    internal_error << "Unimplemented\n";
+    internal_assert(op->values.size() == 1);
+    mlir::Value value = codegen(op->values[0]);
+    mlir::Value buffer = sym_get(op->name);
+
+    mlir::SmallVector<mlir::Value> args;
+    for (const auto &r : op->args) {
+        mlir::Value index = codegen(r);
+        index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), index);
+        args.push_back(index);
+    }
+    builder.create<mlir::memref::StoreOp>(value, buffer, mlir::ValueRange{args});
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Allocate *op) {
@@ -880,7 +901,31 @@ void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Free *op) {
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Realize *op) {
-    internal_error << "Unimplemented\n";
+    mlir::SmallVector<int64_t> shapes;
+    for (const auto &d : op->bounds) {
+        internal_assert(is_const_zero(d.min));
+        internal_assert(is_const(d.extent));
+        shapes.push_back(*as_const_int(d.extent));
+    }
+    mlir::MemRefType type = mlir::MemRefType::get(shapes, mlir_type_of(op->types.back()));
+    mlir::memref::AllocOp alloc = builder.create<mlir::memref::AllocOp>(type);
+
+    mlir::SmallVector<mlir::Attribute> cyclic, dims, factors;
+    if (ends_with(op->name, ".ibuffer")) {
+        cyclic.push_back(builder.getIntegerAttr(builder.getI32Type(), 1));
+        dims.push_back(builder.getIntegerAttr(builder.getI32Type(), shapes.size()-1));
+        factors.push_back(builder.getIntegerAttr(builder.getI32Type(), shapes.back()));
+    }
+    alloc->setAttr("var_name", builder.getStringAttr(op->name));
+    if (!cyclic.empty()) {
+        alloc->setAttr("partition_cyclic_array", builder.getArrayAttr(cyclic));
+        alloc->setAttr("partition_dim_array", builder.getArrayAttr(dims));
+        alloc->setAttr("partition_factor_array", builder.getArrayAttr(factors));
+    }
+
+    sym_push(op->name, alloc);
+    codegen(op->body);
+    sym_pop(op->name);
 }
 
 void CodeGen_MLIR_Dev::MLIRBuilder::visit(const Block *op) {
@@ -1044,8 +1089,11 @@ void CodeGen_MLIR_Dev::DeviceClosure::visit(const Call *op) {
         for (size_t i = 1; i < op->args.size()-1; i++) {
             auto var = op->args[i].as<Variable>();
             if (var && space_loops.find(var->name) != space_loops.end()) {
-                alloc.space_dims.push_back(i-1);
-                alloc.factors.push_back(space_loops[var->name]);
+                auto space_it = std::find(alloc.space_dims.begin(), alloc.space_dims.end(), i-1);
+                if (space_it == alloc.space_dims.end()) {
+                    alloc.space_dims.push_back(i-1);
+                    alloc.factors.push_back(space_loops[var->name]);
+                }
             }
         }
     }
@@ -1074,7 +1122,6 @@ void CodeGen_MLIR_Dev::DeviceClosure::visit(const Call *op) {
 Stmt CodeGen_MLIR_Dev::standardize_ir_for_fpga_offloading(const Stmt &s) {
     s.accept(&device_closure);
     Stmt result = RemoveDeviceDeclaration().mutate(s);
-    result = RemoveIfStmt().mutate(result);
     result = simplify(result);
     debug(2) << "Lowering after standardizing IR for generating MLIR code:\n" << result << "\n";
     return result;

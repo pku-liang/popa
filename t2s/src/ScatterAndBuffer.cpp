@@ -2097,7 +2097,7 @@ void get_ScatterBufferArgs(const map<string, Function> &envs, ScatterBufferArgs&
         Function func = e.second;
         auto addressable_params = func.definition().schedule().addressable_buffer_params();
         if (!addressable_params.empty()) {
-            // Handled by another stage
+            // Handled by the other transformation pass
             continue;
         }
         auto buffer_params = func.definition().schedule().buffer_params();
@@ -2106,7 +2106,7 @@ void get_ScatterBufferArgs(const map<string, Function> &envs, ScatterBufferArgs&
             continue;
         }
         internal_assert(buffer_params.size() <= 1 && scatter_params.size() <= 1);
-        
+
         if(!buffer_params.empty()){
             if(!scatter_params.empty()){
                 user_assert(buffer_params[0].func_name == scatter_params[0].func_name)
