@@ -35,6 +35,7 @@
 #include "../../Halide/src/Substitute.h"
 #include "../../Halide/src/Util.h"
 #include "./BuildCallRelation.h"
+#include "./Utilities.h"
 
 namespace Halide{
 using namespace Internal;
@@ -129,7 +130,7 @@ class TestGathering : public IRVisitor{
         if (in_gather_func && op->is_intrinsic(Call::read_channel)){
             const StringImm* channel_name = op->args[0].as<StringImm>();
             assert(channel_name);
-            if(ends_with(channel_name->value, func_name + ".channel")){
+            if(extract_first_token(channel_name->value) == func_name){
                 user_assert(!found_call.defined())
                     << GATHER_ERROR_MESSAGE(func_name, caller_name, gather_loop_name)
                     << func_name + " appears multi times in " + caller_name
@@ -140,7 +141,7 @@ class TestGathering : public IRVisitor{
             const StringImm* channel_name = op->args[0].as<StringImm>();
             assert(channel_name);
             bool not_found = !(found_call.defined());
-            if(ends_with(channel_name->value,caller_name+".channel")){
+            if(extract_first_token(channel_name->value) == caller_name){
                 IRVisitor::visit(op);
                 if(not_found && found_call.defined()){
                     write_channel_stmt = Evaluate::make(op);

@@ -466,10 +466,12 @@ class RealizeOnFPGA
             c.assoc_func.isolate_consumer(first_func);
             debug(1) << "T2X emits: " << c.assoc_func.name() << ".isolate_consumer("
                      << first_func.name() << ");\n";
-            // generate_output_array(outf, f_dev);
-            first_func.space_time_transform(c.stensors[0].v_banks);
-            debug(1) << "T2X emits: " << first_func.name() << ".space_time_transform("
-                     << names_to_string(c.stensors[0].v_banks) << ");\n";
+            for (const auto &v : c.stensors[0].v_banks) {
+                first_func.unroll(v);
+            }
+            // first_func.space_time_transform(c.stensors[0].v_banks);
+            // debug(1) << "T2X emits: " << first_func.name() << ".space_time_transform("
+            //          << names_to_string(c.stensors[0].v_banks) << ");\n";
             vector<Func> other_cons(consumers.begin()+1, consumers.end());
             first_func.isolate_consumer_chain(other_cons);
             debug(1) << "T2X emits: " << first_func.name() << ".isolate_consumer_chain("
@@ -555,30 +557,29 @@ class RealizeOnFPGA
         internal_assert(c.stensors.size() == consumers.size());
         auto &prev_dims = c.stensors[0].v_banks;
 
-        for (size_t i = 1; i < c.stensors.size(); i++) {
+        for (size_t i = 0; i < c.stensors.size(); i++) {
             auto v_banks = c.stensors[i].v_banks;
             auto position = c.stensors[i].position;
             if (position == REG && v_banks.size() == prev_dims.size()-1) {
-                Func prev_1 = consumers[i-1];
-                Func prev_2 = (i == 1) ? c.assoc_func : consumers[i-2];
+                Func prev = (i == 0) ? c.assoc_func : consumers[i-1];
                 Var v_gather = find_differences(prev_dims, v_banks);
-                prev_1.gather(prev_2, v_gather);
-                debug(1) << "T2X emits: " << prev_1.name() << ".gather("
-                         << prev_2.name() << ", " << v_gather << ");\n";
+                consumers[i].gather(prev, v_gather);
+                debug(1) << "T2X emits: " << consumers[i].name() << ".gather("
+                         << prev.name() << ", " << v_gather << ");\n";
                 // Trick: The behavior of gather depends on bank dimensions
-                // 2->1: Values transferred one by one via shift registers
-                // 1->0: Values are gathered across banks and sent as a vector,
-                //       to simplify vectorize phase, we perform it here
-                if (v_banks.size() == 0) {
-                    // producer
-                    prev_1.vectorize(v_gather);
-                    debug(1) << "T2X emits: " << prev_1.name() << ".vectorize("
-                             << v_gather << ");\n";
-                    // consumer
-                    consumers[i].vectorize(v_gather);
-                    debug(1) << "T2X emits: " << consumers[i].name() << ".vectorize("
-                             << v_gather << ");\n";
-                }
+                // 2->1: Values are transferred one by one via shift registers
+                // 1->0: Values are gathered across banks and sent as a vector.
+                //       We apply vectorization here to simplify the lowering pass.
+                // if (v_banks.size() == 0) {
+                //     // producer
+                //     prev_1.vectorize(v_gather);
+                //     debug(1) << "T2X emits: " << prev_1.name() << ".vectorize("
+                //              << v_gather << ");\n";
+                //     // consumer
+                //     consumers[i].vectorize(v_gather);
+                //     debug(1) << "T2X emits: " << consumers[i].name() << ".vectorize("
+                //              << v_gather << ");\n";
+                // }
             }
             prev_dims = v_banks;
         }

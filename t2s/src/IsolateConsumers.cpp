@@ -17,6 +17,7 @@
 * SPDX-License-Identifier: BSD-2-Clause-Patent
 *******************************************************************************/
 #include "./DebugPrint.h"
+#include "./Utilities.h"
 
 namespace Halide {
 
@@ -77,7 +78,7 @@ Func &Func::isolate_consumer(Func c) {
     c.function().definition().schedule().is_output() = func.definition().schedule().is_output();
     c.function().definition().schedule().splits() = func.definition().schedule().splits();
     c.function().definition().schedule().dims() = func.definition().schedule().dims();
-    c.function().definition().schedule().transform_params() = func.definition().schedule().transform_params();
+    // c.function().definition().schedule().transform_params() = func.definition().schedule().transform_params();
     c.function().arg_min_extents() = func.arg_min_extents();
     c.function().isolated_from_as_consumer() = name();
 

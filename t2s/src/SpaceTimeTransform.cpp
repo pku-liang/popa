@@ -184,9 +184,9 @@ Func& Func::space_time_transform(const vector<Var>& src_vars,
     user_assert(dst_size <= src_size);
 
     // Check if the number of vars exceeds the number of loops variables
-    user_assert(src_size <= this->args().size())
-        << "Number of space variables (" << src_size
-        << ") exceeds the number of loop variables (" << this->args().size()<< ").";
+    // user_assert(src_size <= this->args().size())
+    //     << "Number of space variables (" << src_size
+    //     << ") exceeds the number of loop variables (" << this->args().size()<< ").";
 
     vector<std::string> src_names(src_size);
     vector<std::string> dst_names(dst_size);
