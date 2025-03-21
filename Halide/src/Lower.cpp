@@ -260,9 +260,9 @@ void lower_impl(const vector<Function> &output_funcs,
     // This uniquifies the variable names, so we're good to simplify
     // after this point. This lets later passes assume syntactic
     // equivalence means semantic equivalence.
-    // debug(1) << "Uniquifying variable names...\n";
-    // s = uniquify_variable_names(s);
-    // log("Lowering after uniquifying variable names:", s);
+    debug(1) << "Uniquifying variable names...\n";
+    s = uniquify_variable_names(s, env);
+    log("Lowering after uniquifying variable names:", s);
 
     debug(1) << "Partitioning loops to simplify boundary conditions...\n";
     s = partition_loops(s);

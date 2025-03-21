@@ -1,3 +1,4 @@
+#include "Function.h"
 #include "UniquifyVariableNames.h"
 #include "IREquality.h"
 #include "IRMutator.h"
@@ -166,6 +167,20 @@ public:
 }  // namespace
 
 Stmt uniquify_variable_names(const Stmt &s) {
+    FindFreeVars finder;
+    s.accept(&finder);
+    UniquifyVariableNames u(&finder.free_vars);
+    return u.mutate(s);
+}
+
+Stmt uniquify_variable_names(const Stmt &s, const std::map<string, Function> &env, bool bypass_isolated_kernel) {
+    if (bypass_isolated_kernel) {
+        bool found = false;
+        for (auto &kv : env) {
+            if (!kv.second.isolated_from_as_consumer().empty() || !kv.second.isolated_from_as_producer().empty()) found = true;
+        }
+        if (found) return s;
+    }
     FindFreeVars finder;
     s.accept(&finder);
     UniquifyVariableNames u(&finder.free_vars);

@@ -1,9 +1,8 @@
 #!/bin/bash
 if [ -z "$1" ]; then
     echo "Usage:"
-    echo "  Generate MLIR files: ./hls-tutorial.sh generate"
-    echo "  Run vanilla version: ./hls-tutorial.sh run vanilla"
-    echo "  Run optimized version: ./hls-tutorial.sh run optimized"
+    echo "  Generate MLIR and SchedIR files: ./hls-tutorial.sh generate [basic/SA/IO]"
+    echo "  Run vanilla version: ./hls-tutorial.sh run [basic/SA]"
 fi
 
 POPA_DIR=${POPA_DIR:=popa}
@@ -12,10 +11,10 @@ HESTIA_DIR=${HESTIA:=hestia}
 
 run_popa() {
     pushd $POPA_DIR/examples >/dev/null
-    if [[ ! -e "tutorial" ]]; then
-        g++ tutorial.cpp -g -I../install/include -L../install/lib -lHalide -std=c++17 -o tutorial
+    if [[ ! -e "matrix_multiply" ]]; then
+        g++ matrix_multiply.cpp -g -I../install/include -L../install/lib -lHalide -std=c++17 -o matrix_multiply
     fi
-    env LD_LIBRARY_PATH=../install/lib ./tutorial $1
+    env LD_LIBRARY_PATH=../install/lib ./matrix_multiply $1
     popd >/dev/null
 }
 
@@ -30,16 +29,14 @@ run_hector() {
 }
 
 if [[ "$1" == "generate" ]]; then
-    run_popa vanilla
-    run_popa optimized
-fi
-
-if [[ "$1" == "run" ]]; then
-    if [[ "$2" == "vanilla" ]]; then
-        cp $POPA_DIR/examples/SCF_vanilla.mlir $HECTOR_DIR/examples/popa/
-        run_hector examples/popa/SCF_vanilla.mlir
-    elif [[ "$2" == "optimized" ]]; then
-        cp $POPA_DIR/examples/SCF_optimized.mlir $HECTOR_DIR/examples/popa/
-        run_hector examples/popa/SCF_optimized.mlir
+    run_popa $2
+elif [[ "$1" == "run" ]]; then
+    if [[ ! -e "$POPA_DIR/examples/SCF_$2.mlir" ]]; then
+        echo "Please generate the MLIR file SCF_$2.mlir first"
+        exit 1
     fi
+    cp $POPA_DIR/examples/SCF_$2.mlir $HECTOR_DIR/examples/popa/
+    run_hector examples/popa/SCF_$2.mlir
+else
+    echo "Invalid command"
 fi

@@ -6,6 +6,8 @@
  */
 
 #include "Expr.h"
+#include "Function.h"
+#include <string>
 
 namespace Halide {
 namespace Internal {
@@ -14,6 +16,7 @@ namespace Internal {
  * is unique. This lets later passes assume syntactic equivalence is
  * semantic equivalence. */
 Stmt uniquify_variable_names(const Stmt &s);
+Stmt uniquify_variable_names(const Stmt &s, const std::map<std::string, Function> &env, bool bypass_isolated_kernel = true);
 
 void uniquify_variable_names_test();
 

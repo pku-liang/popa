@@ -627,19 +627,20 @@ public:
             // Check if this condition guards the write_channel call
             auto eval = op->then_case.as<Evaluate>();
             if (eval && eval->value.as<Call>()) {
-                internal_assert(eval->value.as<Call>()->is_intrinsic(Call::write_channel));
-                auto conjuction = break_logic_into_conjunction(op->condition);
-                for (auto c : conjuction) {
-                    auto eq = c.as<EQ>();
-                    internal_assert(eq);
-                    auto eq_a = eq->a.as<Variable>();
-                    internal_assert(eq_a);
-                    auto it = std::find_if(for_ops.begin(), for_ops.end(), [&](const For *lp){ return lp->name == eq_a->name; });
-                    boundary_loops.insert(*it);
+                if (eval->value.as<Call>()->is_intrinsic(Call::write_channel)) {
+                    auto conjuction = break_logic_into_conjunction(op->condition);
+                    for (auto c : conjuction) {
+                        auto eq = c.as<EQ>();
+                        internal_assert(eq);
+                        auto eq_a = eq->a.as<Variable>();
+                        internal_assert(eq_a);
+                        auto it = std::find_if(for_ops.begin(), for_ops.end(), [&](const For *lp){ return lp->name == eq_a->name; });
+                        boundary_loops.insert(*it);
+                    }
+                    internal_assert(!op->else_case.defined());
+                    body_of_if_stmt = op->then_case;
+                    return Stmt();
                 }
-                internal_assert(!op->else_case.defined());
-                body_of_if_stmt = op->then_case;
-                return Stmt();
             }
         }
         return IRMutator::visit(op);
@@ -656,8 +657,15 @@ Stmt flatten_UREs(Stmt s, const vector<Function> &outputs, const vector<vector<s
     for (auto &group : fused_groups) {
         user_assert(outputs.size() == 1)
             << "Currently only a single output is allowed\n";
-        UreFlattener uf(group[0], outputs[0].name(), env);
-        s = uf.mutate(s);
+        Function func;
+        internal_assert(function_is_in_environment(group[0], env, func));
+        // Only UREs or isolated IO kernels are valid for transformation
+        if (func.has_merged_defs()
+        || !func.isolated_from_as_consumer().empty()
+        || !func.isolated_from_as_producer().empty()) {
+            UreFlattener uf(group[0], outputs[0].name(), env);
+            s = uf.mutate(s);
+        }
     }
     return s;
 }
