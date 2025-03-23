@@ -65,6 +65,14 @@ class AllocationInference : public IRMutator {
         map<string, Function>::const_iterator iter = env.find(op->name);
         internal_assert(iter != env.end());
         Function f = iter->second;
+
+        if ((f.has_merged_defs() || f.definition().schedule().is_merged())
+        || !f.isolated_from_as_consumer().empty()
+        || !f.isolated_from_as_producer().empty()) {
+            // If the function has merged definitions, the bounds are defined during
+            // the shift register allocation pass, so we cannot perform any inference.
+            return IRMutator::visit(op);
+        }
         const vector<string> f_args = f.args();
         const std::map<std::string, std::pair<Expr, Expr>> &arg_min_extents = f.arg_min_extents();
 

@@ -288,11 +288,9 @@ void lower_impl(const vector<Function> &output_funcs,
     s = simplify_correlated_differences(s);
     log("Lowering after simplifying correlated differences:", s);
 
-    if (!t.has_fpga_feature()) {
-        debug(1) << "Performing allocation bounds inference...\n";
-        s = allocation_bounds_inference(s, env, func_bounds);
-        log("Lowering after allocation bounds inference:", s);
-    }
+    debug(1) << "Performing allocation bounds inference...\n";
+    s = allocation_bounds_inference(s, env, func_bounds);
+    log("Lowering after allocation bounds inference:", s);
 
     bool will_inject_host_copies =
         (t.has_gpu_feature() ||

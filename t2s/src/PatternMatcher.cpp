@@ -627,7 +627,8 @@ public:
             // Check if this condition guards the write_channel call
             auto eval = op->then_case.as<Evaluate>();
             if (eval && eval->value.as<Call>()) {
-                if (eval->value.as<Call>()->is_intrinsic(Call::write_channel)) {
+                if (eval->value.as<Call>()->is_intrinsic(Call::write_channel)
+                    || eval->value.as<Call>()->is_intrinsic(Call::image_store)) {
                     auto conjuction = break_logic_into_conjunction(op->condition);
                     for (auto c : conjuction) {
                         auto eq = c.as<EQ>();
