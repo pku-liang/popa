@@ -51,15 +51,18 @@ cd ..
 
 # Publications
 
-+ **POPA: Expressing High and Portable Performance across Spatial and Vector Architectures for Tensor Computations**.  
-Xiaochen Hao, Hongbo Rong, Mingzhe Zhang, Ce Sun, Hong Jiang, Yun Liang. FPGA, 2024.
++ **Productively Generating a High-Performance Linear Algebra Library on FPGAs**.  
+Xiaochen Hao, Mingzhe Zhang, Ce Sun, Zhuofu Tao, Hongbo Rong, Yu Zhang, Lei He, Eric Petit, Wenguang Chen, Yun Liang. TRETS, 2025. [Link](https://doi.org/10.1145/3723046)
 
-+ **Lasa: Abstraction and Specialization for Productive and Performant Linear Algebra on FPGAs**. 
++ **POPA: Expressing High and Portable Performance across Spatial and Vector Architectures for Tensor Computations**.  
+Xiaochen Hao, Hongbo Rong, Mingzhe Zhang, Ce Sun, Hong Jiang, Yun Liang. FPGA, 2024. [Link](https://doi.org/10.1145/3626202.3637566)
+
++ **Lasa: Abstraction and Specialization for Productive and Performant Linear Algebra on FPGAs**.  
 Xiaochen Hao, Mingzhe Zhang, Ce Sun, Zhuofu Tao, Hongbo Rong, Yu Zhang, Lei He, Eric Petit, Wenguang Chen, Yun Liang. FCCM, 2023. [Link](https://ieeexplore.ieee.org/abstract/document/10171577)
 
-+ **SuSy: a programming model for productive construction of high-performance systolic arrays on FPGAs**. 
++ **SuSy: a programming model for productive construction of high-performance systolic arrays on FPGAs**.  
 Yi-Hsiang Lai, Hongbo Rong, Size Zheng, Weihao Zhang, Xiuping Cui, Yunshan Jia, Jie Wang, Brendan Sullivan, Zhiru Zhang, Yun Liang, Youhui Zhang, Jason Cong, Nithin George, Jose Alvarez, Christopher Hughes, and Pradeep Dubey. 2020.  ICCAD 2020. [Link](https://ieeexplore.ieee.org/document/9256583) 
 
-+ **T2S-Tensor: Productively Generating High-Performance Spatial Hardware for Dense Tensor Computations**. 
++ **T2S-Tensor: Productively Generating High-Performance Spatial Hardware for Dense Tensor Computations**.  
 Nitish Srivastava, Hongbo Rong, Prithayan Barua, Guanyu Feng, Huanqi Cao, Zhiru Zhang, David Albonesi,Vivek Sarkar, Wenguang Chen, Paul Petersen, Geoff Lowney, Adam Herr, Christopher Hughes,Timothy Mattson, Pradeep Dubey. FCCM, 2019. [Link](https://ieeexplore.ieee.org/document/8735529)
 
